@@ -1,5 +1,6 @@
 #include "engine/engine.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
@@ -13,7 +14,7 @@ int64_t SystemClock::now_ms() const {
 }
 
 static int64_t infer_day0(int64_t now_ms) {
-  // 演示环境：UTC 当日 00:00 + 07:00。正式版由配置注入（docs/09）。
+  // 演示环境：UTC 当日 00:00 + 06:00（营业开始）。正式版由配置注入（docs/09）。
   return (now_ms / 86400000LL) * 86400000LL + kDayStartMin * 60000LL;
 }
 
@@ -85,7 +86,7 @@ Outcome Engine::handle_reserve(const Event& req) {
 Outcome Engine::handle_cancel(const Event& req) {
   const Booking* b = find_booking(req.booking_id);
   if (!b) return Outcome{false, "", 0, "E_NOT_FOUND"};
-  if (b->state != BookingState::HELD) return Outcome{false, "", 0, "E_WINDOW"};
+  if (b->state != BookingState::PENDING_ENTRY) return Outcome{false, "", 0, "E_WINDOW"};
   if (clock_->now_ms() >= b->start_ms)
     return Outcome{false, req.booking_id, 0, "E_WINDOW"};  // 开始后只能签退
   Event e = req;
@@ -99,7 +100,7 @@ Outcome Engine::handle_checkin(const Event& req) {
   if (!b) return Outcome{false, "", 0, "E_NOT_FOUND"};
   const int64_t now = clock_->now_ms();
   // 签到窗口 = [时段开始, 开始+15min)；提前/迟到都不落日志
-  if (b->state != BookingState::HELD || now < b->start_ms ||
+  if (b->state != BookingState::PENDING_ENTRY || now < b->start_ms ||
       now > b->deadline_ms)
     return Outcome{false, req.booking_id, 0, "E_WINDOW"};
   Event e = req;
@@ -111,7 +112,7 @@ Outcome Engine::handle_checkin(const Event& req) {
 Outcome Engine::handle_checkout(const Event& req) {
   const Booking* b = find_booking(req.booking_id);
   if (!b) return Outcome{false, "", 0, "E_NOT_FOUND"};
-  if (b->state != BookingState::ACTIVE)
+  if (b->state != BookingState::IN_LIBRARY)
     return Outcome{false, req.booking_id, 0, "E_WINDOW"};
   Event e = req;
   e.type = EventType::CHECKOUT;
@@ -143,6 +144,15 @@ Outcome Engine::dispatch(const IncomingRequest& req) {
   return Outcome{false, "", 0, "E_PARAM"};
 }
 
+int64_t Engine::entry_deadline_for(int day_off, int64_t start_ms,
+                                   int64_t now_ms) const {
+  const int64_t day_anchor = day0_start_ms_ +
+      static_cast<int64_t>(day_off) * 86400000LL;                 // 当日 06:00
+  if (day_off == 0 && now_ms < day_anchor + 2 * 3600000LL)        // 08:00 前申请
+    return day_anchor + (2 * 60 + 30) * 60000LL;                  // 保留至 08:30
+  return std::max(now_ms, start_ms) + kEntryGraceMs;
+}
+
 // ---------- apply：唯一线性化点 ----------
 
 void Engine::apply(const Event& raw, uint64_t index) {
@@ -160,9 +170,9 @@ void Engine::apply(const Event& raw, uint64_t index) {
         b.seat_id = ev.seat_id;
         b.day_off = ev.day_off;
         b.mask = ev.mask;
-        b.state = BookingState::HELD;
+        b.state = BookingState::PENDING_ENTRY;
         b.start_ms = start_ms_of(ev.day_off, ev.start_min);
-        b.deadline_ms = b.start_ms + kCheckinGraceMs;  // 窗口=[开始,开始+15min)
+        b.deadline_ms = entry_deadline_for(ev.day_off, b.start_ms, ev.ts_ms);
         b.seq = ev.seq;
         bookings_[b.id] = b;
         if (!ev.request_id.empty()) idempotent_[ev.request_id] = b.id;
@@ -177,7 +187,7 @@ void Engine::apply(const Event& raw, uint64_t index) {
     }
     case EventType::CANCEL: {
       Booking* b = find_booking(ev.booking_id);
-      if (b && b->state == BookingState::HELD &&
+      if (b && b->state == BookingState::PENDING_ENTRY &&
           ev.ts_ms < b->start_ms) {
         board_.release(b->seat_id, b->day_off, b->mask);
         b->state = BookingState::CANCELLED;  // 信用 0
@@ -188,10 +198,11 @@ void Engine::apply(const Event& raw, uint64_t index) {
       break;
     }
     case EventType::CHECKIN: {
+      // 入馆刷卡：窗口 = [时段开始(或申请时刻), 入馆资格截止]
       Booking* b = find_booking(ev.booking_id);
-      if (b && b->state == BookingState::HELD && ev.ts_ms >= b->start_ms &&
+      if (b && b->state == BookingState::PENDING_ENTRY && ev.ts_ms >= b->start_ms &&
           ev.ts_ms <= b->deadline_ms) {
-        b->state = BookingState::ACTIVE;
+        b->state = BookingState::IN_LIBRARY;
         last_outcome_ = Outcome{true, b->id, 0, ""};
       } else {
         last_outcome_ = Outcome{false, ev.booking_id, 0, "E_WINDOW"};
@@ -201,7 +212,7 @@ void Engine::apply(const Event& raw, uint64_t index) {
     case EventType::CHECKOUT: {
       Booking* b = find_booking(ev.booking_id);
       // 提前签退：释放剩余时段（含当前片的剩余部分），交给候补授权流程
-      if (b && b->state == BookingState::ACTIVE) {
+      if (b && b->state == BookingState::IN_LIBRARY) {
         const int64_t day_abs = day0_start_ms_ +
                                 static_cast<int64_t>(b->day_off) * 86400000LL;
         const int64_t m = (ev.ts_ms - day_abs) / 60000 - kDayStartMin;
@@ -219,7 +230,7 @@ void Engine::apply(const Event& raw, uint64_t index) {
             kSlotMinutes * 60000LL;
         const int credit = (ev.ts_ms >= b->start_ms + dur_ms) ? +1 : 0;
         (void)credit;  // 信用结算由控制面消费事件完成；detail 携带 delta
-        b->state = BookingState::DONE;
+        b->state = BookingState::LEFT;
         last_outcome_ = Outcome{true, b->id, 0, "credit=" + std::to_string(credit)};
       } else {
         last_outcome_ = Outcome{false, ev.booking_id, 0, "E_WINDOW"};
@@ -228,9 +239,9 @@ void Engine::apply(const Event& raw, uint64_t index) {
     }
     case EventType::EXPIRE: {
       Booking* b = find_booking(ev.booking_id);
-      if (b && b->state == BookingState::HELD && ev.ts_ms >= b->deadline_ms) {
+      if (b && b->state == BookingState::PENDING_ENTRY && ev.ts_ms >= b->deadline_ms) {
         board_.release(b->seat_id, b->day_off, b->mask);
-        b->state = BookingState::EXPIRED;  // 信用 -10（控制面结算）
+        b->state = BookingState::NO_SHOW;  // 信用 -10（控制面结算）
         last_outcome_ = Outcome{true, b->id, 0, "credit=-10"};
       }  // 否则幂等跳过（tick 与重放竞争时安全）
       break;
@@ -259,7 +270,7 @@ Booking* Engine::find_booking(const std::string& id) {
 }
 
 void Engine::arm_timers_for(const Booking& b) {
-  if (b.state == BookingState::HELD) {
+  if (b.state == BookingState::PENDING_ENTRY) {
     const uint64_t id =
         timers_->schedule(b.deadline_ms, "expire:" + b.id);
     timer_tag_to_booking_[id] = b.id;

@@ -2,7 +2,7 @@
 
 语义与 engine/src/engine.cpp 参考实现一致：
   预检冲突快速失败；仲裁即 apply（此处 = 持锁后的最终判定）；拒绝不产生日志事件；
-  ID 确定性（B<seq>）；签到窗口 = [时段开始, 开始+15min)；取消仅开始前；
+  ID 确定性（B<seq>）；入馆刷卡窗 30min（当日 08:00 前申请保留至 08:30）；取消仅开始前；
   提前签退释放剩余片。
 线程安全：1000 线程并发抢 1 座恰好 1 人成功（demo_contract.py 验证）。
 
@@ -16,7 +16,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from contracts import (CHECKIN_GRACE_MS, DAY_START_MIN, ROLLING_DAYS, Event,
+from contracts import (ENTRY_GRACE_MS, DAY_START_MIN, ROLLING_DAYS, Event,
                        Outcome, ReserveRequest, mask_for)
 
 DAY_MS = 86_400_000
@@ -27,7 +27,7 @@ def _now_ms() -> int:
 
 
 def _infer_day0(now: int) -> int:
-    """与 engine.cpp infer_day0 一致：UTC 当日 00:00 + 07:00。"""
+    """与 engine.cpp infer_day0 一致：UTC 当日 00:00 + 06:00（营业开始）。"""
     return (now // DAY_MS) * DAY_MS + DAY_START_MIN * 60_000
 
 
@@ -38,7 +38,7 @@ class _Booking:
     seat_id: int
     day_off: int
     mask: int
-    state: str            # HELD/ACTIVE/EXPIRED/CANCELLED/DONE
+    state: str            # PENDING_ENTRY/IN_LIBRARY/BREAKAWAY/LEFT/NO_SHOW/CANCELLED/GRANTED
     start_ms: int
     deadline_ms: int
     seq: int
@@ -107,12 +107,19 @@ class MockEngine:
             self._seq += 1
             bid = f"B{self._seq}"
             self._bits[(req.day_off, req.seat_id)] = cur | mask
+            now = self._clock()
             start_ms = (self._day0 + req.day_off * DAY_MS
                         + req.start_min * 60_000)
+            # 入馆资格截止（对齐馆方规则）：当日 08:00 前申请保留至 08:30；
+            # 其余 = max(申请时刻, 时段开始) + 30min
+            if req.day_off == 0 and now < self._day0 + 2 * 3_600_000:
+                deadline = self._day0 + (2 * 60 + 30) * 60_000
+            else:
+                deadline = max(now, start_ms) + ENTRY_GRACE_MS
             self._bookings[bid] = _Booking(
                 id=bid, user_id=req.user_id, seat_id=req.seat_id,
-                day_off=req.day_off, mask=mask, state="HELD",
-                start_ms=start_ms, deadline_ms=start_ms + CHECKIN_GRACE_MS,
+                day_off=req.day_off, mask=mask, state="PENDING_ENTRY",
+                start_ms=start_ms, deadline_ms=deadline,
                 seq=self._seq)
             if req.request_id:
                 self._idem[req.request_id] = bid
@@ -127,8 +134,9 @@ class MockEngine:
             b = self._bookings.get(booking_id)
             if b is None:
                 return Outcome(False, detail="E_NOT_FOUND")
-            if b.state != "HELD" or self._clock() >= b.start_ms:
+            if b.state != "PENDING_ENTRY" or self._clock() >= b.start_ms:
                 return Outcome(False, booking_id, detail="E_WINDOW")
+            # TODO(M5, P2)：取消后 30min 冷却（CANCEL_COOLDOWN_MS，网关前置校验）
             self._seq += 1
             self._apply_bits(b.day_off, b.seat_id, b.mask, set=False)
             b.state = "CANCELLED"  # 信用 0（控制面结算）
@@ -142,10 +150,10 @@ class MockEngine:
             now = self._clock()
             if b is None:
                 return Outcome(False, detail="E_NOT_FOUND")
-            if b.state != "HELD" or not b.start_ms <= now <= b.deadline_ms:
+            if b.state != "PENDING_ENTRY" or not b.start_ms <= now <= b.deadline_ms:
                 return Outcome(False, booking_id, detail="E_WINDOW")
             self._seq += 1
-            b.state = "ACTIVE"
+            b.state = "IN_LIBRARY"
             self._publish("CHECKIN", b.user_id, booking_id=b.id)
             return Outcome(True, b.id)
 
@@ -154,14 +162,15 @@ class MockEngine:
             b = self._bookings.get(booking_id)
             if b is None:
                 return Outcome(False, detail="E_NOT_FOUND")
-            if b.state != "ACTIVE":
+            if b.state != "IN_LIBRARY":
+                # TODO(M1, P2)：BREAKAWAY（中途离开保留期）路径
                 return Outcome(False, booking_id, detail="E_WINDOW")
             self._seq += 1
             consumed = self._consumed_slots(b, self._clock())
             released = b.mask & ~(((1 << consumed) - 1) if consumed < 64
                                   else (1 << 64) - 1)
             self._apply_bits(b.day_off, b.seat_id, released, set=False)
-            b.state = "DONE"  # released==0 → 按时完成 +1；提前签退 0
+            b.state = "LEFT"  # released==0 → 按时完成 +1；提前离馆 0
             self._publish("CHECKOUT", b.user_id, booking_id=b.id,
                           released_mask=released)
             self._publish_seat_changed(b.day_off, b.seat_id)
@@ -170,15 +179,15 @@ class MockEngine:
     # ---- 超时（测试/演示用；生产由 C++ 时间轮驱动） ----
 
     def expire_due(self) -> int:
-        """将所有超时未签到的 HELD 单置为 EXPIRED，返回处理条数。"""
+        """将所有超时未入馆的 PENDING_ENTRY 单置为 NO_SHOW，返回处理条数。"""
         n = 0
         with self._lock:
             now = self._clock()
             for b in list(self._bookings.values()):
-                if b.state == "HELD" and now > b.deadline_ms:
+                if b.state == "PENDING_ENTRY" and now > b.deadline_ms:
                     self._seq += 1
                     self._apply_bits(b.day_off, b.seat_id, b.mask, set=False)
-                    b.state = "EXPIRED"  # 信用 -10（控制面结算）
+                    b.state = "NO_SHOW"  # 超时未入馆：信用 -10 + 当日禁约（网关硬规则）
                     self._publish("EXPIRE", b.user_id, booking_id=b.id)
                     self._publish_seat_changed(b.day_off, b.seat_id)
                     n += 1

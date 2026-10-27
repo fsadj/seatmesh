@@ -1,29 +1,41 @@
 syntax = "proto3";
 package scheduler.v2;
 // ============================================================
-// SeatMesh v2 契约 —— 冻结版（含终审增补）。修改规则：field 编号
-// 只增不删；语义变更需两端评审 + epoch +1。
+// SeatMesh v2 契约 —— epoch 2：对齐真实校园图书馆选座系统语义
+// （平行实现；仅对齐接口形状与业务规则，不连接、不依赖任何真实系统）
+//
+// 修改规则：field 编号只增不删；语义变更需两端评审 + epoch +1。
 //
 // 全局常量（与本文件绑定，代码不得另立常量）：
-//   时间粒度 15min；运营时间 07:00–23:00；SLOTS_PER_DAY = 64
-//   bit i 表示 [07:00+15i, 07:00+15(i+1))
+//   时间粒度 15min；营业时间 06:00–22:00；SLOTS_PER_DAY = 64
+//   bit i 表示 [06:00+15i, 06:00+15(i+1))
 //   day_off ∈ [0,13]（0=今天）；ROLLING_DAYS = 14
-//   CHECKIN_GRACE = 15min；签到窗口 = [时段开始, 开始+15min)，不允许提前签到
-//   GRANT_TTL = 60s（推送→解锁→点击的实测反应预算 10–20s，5s 产品上不可用）
-//   SAGA_TIMEOUT = 30s（跨区配额确认，独立于签到窗口）
-//   CHECKOUT：允许提前签退，剩余时段立即释放并进入等待队列授权
-//   信用规则：按时完成 +1 / 提前签退 0 / 开始前取消 0 / 爽约 -10
-//   MAX_SLOTS_PER_REQ = 16（单次最多预约 4 小时）
-//   单用户全局活跃预约数 = 1（Saga 强制）
-//   region_id：A校区=0，B校区=1
 //
-// 传输：写请求走 ZMQ DEALER→ROUTER（protobuf 二进制）；
+//   入馆资格（对齐馆方规则）：
+//     申请成功后 ENTRY_GRACE=30min 内入馆刷卡；
+//     当日 08:00 前的申请统一保留至当日 08:30
+//   中途离开保留期：11:00–13:00 / 17:00–19:00 离开保留 60min，其余 30min
+//   取消/爽约后 CANCEL_COOLDOWN=30min 内不可再申请
+//   申请开放时段：每日 06:00–21:45
+//   超时未入馆（NO_SHOW）→ 当日不可再线上申请（网关硬规则）
+//
+//   预约单状态机（与真实系统六态对齐）：
+//     PENDING_ENTRY 待入馆 → IN_LIBRARY 已入馆 → LEFT 已离馆
+//                          ↘ BREAKAWAY 中途离开(保留期内) → IN_LIBRARY/LEFT
+//     PENDING_ENTRY →(超时) NO_SHOW 超时未入馆
+//     PENDING_ENTRY →(取消) CANCELLED 已取消
+//     扩展态 GRANTED 候补授权（本系统特有，位图保持置位 60s）
+//
+//   座位寻址：内部 seat_id(int) 不变；对外维度 = 楼层 floor → 区域 area(sp)
+//   → 座位编号 kid（如 "D005"），映射由元数据表承载（compat 层解析）。
+//   region_id：0/1/2 = 三个校区（真实多校区语义，映射见部署配置）。
+//
+// 传输：写请求走 ZMQ DEALER→ROUTER（v0=JSON 帧，protobuf 就绪后切换）；
 //       事件流走 PUB，首字节为 region_id 作订阅前缀；
 //       非 leader 节点对写请求回 Redirect（帧类型 0x01）。
 // 幂等：所有写请求携带 request_id(UUIDv4)，引擎 LRU 去重（上限 10 万条），
 //       网关超时重试安全；重放返回 E_IDEMPOTENT_REPLAY + 原结果。
-// 读己之写：写响应携带 applied_seq；客户端后续查询携带 min_applied_seq，
-//       网关副本水位不足时等待或带 staleness 标注应答。
+// 读己之写：写响应携带 applied_seq；客户端后续查询携带 min_applied_seq。
 // ============================================================
 
 // ---------- 通用 ----------
@@ -38,13 +50,14 @@ enum ErrorCode {
   OK = 0;
   E_CONFLICT          = 1;  // 时间冲突（conflict_mask 携带详情）
   E_SHED              = 2;  // 引擎过载，按 backoff_hint_ms 退避
-  E_QUOTA             = 3;  // 配额不足（活跃预约=1 / 信用分不足）
+  E_QUOTA             = 3;  // 配额不足（活跃预约=1 / 信用分不足 / 当日已爽约）
   E_NOT_FOUND         = 4;
   E_FORBIDDEN         = 5;  // 操作非本人资源（属主校验）
-  E_WINDOW            = 6;  // 不在可操作窗口（签到/签退/取消时机不对）
-  E_IDEMPOTENT_REPLAY = 7;  // 幂等重放，响应附带原结果
-  E_STALE_ROUTE       = 8;  // 路由表过期，刷新 epoch 重试
-  E_SAGA_TIMEOUT      = 9;
+  E_WINDOW            = 6;  // 不在可操作窗口（入馆/离馆/取消/申请时段 06:00–21:45）
+  E_COOLDOWN          = 7;  // 取消/爽约后 30min 冷却期内
+  E_IDEMPOTENT_REPLAY = 8;  // 幂等重放，响应附带原结果
+  E_STALE_ROUTE       = 9;
+  E_SAGA_TIMEOUT      = 10;
 }
 
 // ---------- 写路径 ----------
@@ -52,9 +65,9 @@ message ReserveReq {
   RequestHeader header = 1;
   int32 seat_id   = 2;
   int32 day_off   = 3;
-  int32 start_min = 4;     // 距 07:00 分钟数，15 的倍数
+  int32 start_min = 4;     // 距 06:00 分钟数，15 的倍数；0..960=全天（对齐"当日资格"）
   int32 end_min   = 5;     // 不含端点；end-start ≤ 16 片
-  bool  enqueue_if_conflict = 6;  // 冲突时是否加入等待队列
+  bool  enqueue_if_conflict = 6;  // 冲突时是否加入候补队列
 }
 message ReserveResp {
   RequestHeader header = 1;
@@ -65,25 +78,28 @@ message ReserveResp {
   }
 }
 message BookingCreated {
-  string booking_id          = 1;
-  int64  checkin_deadline_ms = 2;  // UNIX ms = 时段开始+15min；超时未签到 → EXPIRED
-  uint64 applied_seq         = 3;  // 本变更事件 seq；读己之写依据
+  string booking_id        = 1;
+  int64  entry_deadline_ms = 2;  // 入馆刷卡截止；超时 → NO_SHOW(当日禁约)+信用-10
+  uint64 applied_seq       = 3;  // 本变更事件 seq；读己之写依据
 }
 message ConflictDetail {
   uint64 conflict_mask = 1;   // 与请求重叠的已占片，前端精确渲染
-  string queue_ticket  = 2;   // 已入等待队列时非空
+  string queue_ticket  = 2;   // 已入候补队列时非空
   int32  queue_pos     = 3;
 }
 message Shed { int64 backoff_hint_ms = 1; }
 
 message CancelReq  { RequestHeader header = 1; string booking_id = 2; }
-// 语义：仅时段开始前可取消（否则 E_WINDOW）；开始后离场走 Checkout
+// 语义：时段开始前可取消（否则 E_WINDOW）；开始后离场走 Breakaway/Checkout。
+// 取消成功后 30min 冷却（E_COOLDOWN）。
 message CancelResp { RequestHeader header = 1; bool ok = 2; int64 credit_delta = 3; ErrorCode code = 4; }
 
-message CheckinReq  { RequestHeader header = 1; string booking_id = 2; string qr_token = 3; }
+// 入馆/中途离开刷卡（qr_token = 现场凭证，TOTP 30s 轮换，防远程代刷）
+message CheckinReq  { RequestHeader header = 1; string booking_id = 2; string qr_token = 3;
+                      bool leave = 4; }  // false=入馆；true=中途离开（进入保留期）
 message CheckinResp { RequestHeader header = 1; bool ok = 2; ErrorCode code = 3; }
 
-// 提前签退：释放剩余时段（进等待队列授权流程），信用 0；窗口外返回 E_WINDOW
+// 正式离馆（结清）：释放剩余时段（进候补授权流程）；保留期内离馆按剩余处理
 message CheckoutReq  { RequestHeader header = 1; string booking_id = 2; }
 message CheckoutResp { RequestHeader header = 1; bool ok = 2; uint64 released_mask = 3; ErrorCode code = 4; }
 
@@ -120,22 +136,24 @@ message Event {
   uint64 raft_index = 2;   // 产生该事件的日志下标（审计）
   string trace_id   = 3;
   int64  ts_ms      = 4;
-  int32  region_id  = 5;
+  int32  region_id  = 5;   // 0/1/2 = 三校区
   int32  shard_id   = 6;   // v1 恒 0；v2 分片后全序 = (region_id, shard_id, seq)
   oneof payload {
     SeatChanged      seat_changed      = 10;
     BookingCreated   booking_created   = 11;
     BookingRejected  booking_rejected  = 12;
     BookingCancelled booking_cancelled = 13;
-    BookingExpired   booking_expired   = 14;   // 签到窗口超时
-    BookingCheckedIn booking_checked_in = 15;
-    BookingCheckedOut booking_checked_out = 16; // 提前签退，含释放的剩余时段
-    BookingDone      booking_done      = 17;
-    GrantOffered     grant_offered     = 18;
-    GrantExpired     grant_expired     = 19;
-    AdminFreeze      admin_freeze      = 20;
-    RouteTableEpoch  route_epoch       = 21;
-    SagaCmd          saga_cmd          = 22;
+    BookingNoShow    booking_no_show   = 14;   // 超时未入馆（当日禁约+信用-10）
+    BookingCheckedIn booking_checked_in = 15;  // 入馆刷卡
+    BookingCheckedOut booking_checked_out = 16; // 正式离馆，含释放的剩余时段
+    BookingBreakaway booking_breakaway = 17;   // 中途离开（保留期开始）
+    BookingReturned  booking_returned  = 18;   // 保留期内返馆
+    BookingDone      booking_done      = 19;   // 自然离馆（信用+1）
+    GrantOffered     grant_offered     = 20;
+    GrantExpired     grant_expired     = 21;
+    AdminFreeze      admin_freeze      = 22;
+    RouteTableEpoch  route_epoch       = 23;
+    SagaCmd          saga_cmd          = 24;
   }
 }
 message SeatChanged {
@@ -145,18 +163,23 @@ message SeatChanged {
 message BookingRejected {
   int64 user_id = 1; int32 seat_id = 2; int32 day_off = 3;
   uint64 conflict_mask = 4;
-  ErrorCode code = 5;  // CONFLICT | SHED | QUOTA
-  string detail  = 6;  // 人类可读补充
+  ErrorCode code = 5;
+  string detail  = 6;
 }
 message BookingCancelled { string booking_id = 1; int64 user_id = 2; int64 credit_delta = 3; }
-message BookingExpired   { string booking_id = 1; int64 user_id = 2; int64 credit_penalty = 3; }
+message BookingNoShow    { string booking_id = 1; int64 user_id = 2; int64 credit_penalty = 3; }
 message BookingCheckedIn { string booking_id = 1; }
+message BookingBreakaway {
+  string booking_id = 1; int64 user_id = 2;
+  int64  keep_until_ms = 3;   // 保留期截止（11–13/17–19 点离馆为 60min，其余 30min）
+}
+message BookingReturned { string booking_id = 1; }
 message BookingCheckedOut {
   string booking_id = 1; int64 user_id = 2;
-  uint64 released_mask = 3;   // 释放的剩余时段 → 等待队列授权流程
+  uint64 released_mask = 3;   // 释放的剩余时段 → 候补授权流程
 }
 message BookingDone      { string booking_id = 1; }
-message GrantOffered {          // 等待队列授权：位图保持置位，旁人偷不走
+message GrantOffered {          // 候补授权：位图保持置位，旁人偷不走
   string queue_ticket = 1; int64 user_id = 2;
   int32 seat_id = 3; int32 day_off = 4; uint64 mask = 5;
   int64 grant_deadline_ms = 6;  // now + GRANT_TTL(60s)
@@ -181,7 +204,7 @@ message SagaCompensate { string booking_ref = 1; string cause = 2; }
 // ---------- 信用分（控制面消费事件结算；引擎不仲裁信用） ----------
 message CreditEntry {
   int64  user_id    = 1;
-  int64  delta      = 2;   // 按时完成 +1；提前签退 0；开始前取消 0；爽约 -10
+  int64  delta      = 2;   // 按时完成 +1；超时未入馆 -10；其余 0
   string booking_id = 3;
   uint64 event_seq  = 4;   // 来源事件 seq，结算幂等的依据
 }

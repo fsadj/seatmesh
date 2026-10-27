@@ -17,8 +17,8 @@ namespace seatmesh {
 
 struct EngineConfig {
   int n_seats = 200;
-  // 营业日开始时刻（UNIX ms，即 day_off=0 的 07:00）。
-  // <=0 时由时钟推断：UTC 当日 00:00 + 07:00（演示环境够用，正式版配置注入）。
+  // 营业日开始时刻（UNIX ms，即 day_off=0 的 06:00）。
+  // <=0 时由时钟推断：UTC 当日 00:00 + 06:00（演示环境够用，正式版配置注入）。
   int64_t day0_start_ms = 0;
 };
 
@@ -68,6 +68,9 @@ class Engine {
            static_cast<int64_t>(day_off) * 86400000LL +
            static_cast<int64_t>(start_min) * 60000LL;
   }
+  // 入馆资格截止（对齐馆方规则）：当日 08:00 前的申请（仅 day_off==0）
+  // 保留至当日 08:30；其余 = max(申请时刻, 时段开始) + 30min。
+  int64_t entry_deadline_for(int day_off, int64_t start_ms, int64_t now_ms) const;
   Booking* find_booking(const std::string& id);
 
   EngineConfig cfg_;

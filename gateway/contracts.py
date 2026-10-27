@@ -13,18 +13,31 @@ from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
 
 # ---------- 常量（与 protos/scheduler.proto 绑定，代码不得另立） ----------
+# 语义对齐真实校园图书馆选座系统（平行实现，不连接任何真实系统）
 SLOTS_PER_DAY = 64
 SLOT_MINUTES = 15
-DAY_START_MIN = 7 * 60            # 07:00
+DAY_START_MIN = 6 * 60             # 06:00 营业开始
+DAY_END_MIN = 22 * 60              # 22:00（16h = 64 片）
 ROLLING_DAYS = 14
 MAX_SLOTS_PER_REQ = 16
-CHECKIN_GRACE_MS = 15 * 60 * 1000  # 签到窗口 = [开始, 开始+15min)
-GRANT_TTL_MS = 60 * 1000
+ENTRY_GRACE_MS = 30 * 60 * 1000    # 申请成功后 30min 内入馆刷卡
+MORNING_APPLY_BEFORE_MS = 8 * 60 * 60 * 1000   # 当日 08:00 前的申请
+MORNING_HOLD_UNTIL_MIN = 8 * 60 + 30           # 统一保留至当日 08:30
+BREAKAWAY_KEEP_MS = 30 * 60 * 1000             # 中途离开保留期（默认 30min）
+BREAKAWAY_KEEP_PEAK_MS = 60 * 60 * 1000        # 11:00–13:00 / 17:00–19:00 离开 60min
+CANCEL_COOLDOWN_MS = 30 * 60 * 1000            # 取消/爽约后 30min 内不可再申请
+APPLY_OPEN_MIN = 6 * 60                        # 每日 06:00 开放申请
+APPLY_CLOSE_MIN = 21 * 60 + 45                 # 21:45 截止
+GRANT_TTL_MS = 60 * 1000           # 候补授权期（本系统扩展，馆方无对应机制）
 SAGA_TIMEOUT_MS = 30 * 1000
+
+# 预约单状态机（六态与真实系统对齐 + 扩展态 GRANTED）
+BOOKING_STATES = ("PENDING_ENTRY", "GRANTED", "IN_LIBRARY", "BREAKAWAY",
+                  "LEFT", "NO_SHOW", "CANCELLED")
 
 
 def mask_for(start_min: int, end_min: int) -> Optional[int]:
-    """[start_min, end_min)（距 07:00 的分钟）→ 位掩码；非法返回 None。"""
+    """[start_min, end_min)（距 06:00 的分钟）→ 位掩码；非法返回 None。"""
     total = SLOTS_PER_DAY * SLOT_MINUTES
     if start_min < 0 or end_min > total or start_min >= end_min:
         return None

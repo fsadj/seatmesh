@@ -19,3 +19,4 @@ ai/models/
 
 # 前端
 node_modules/
+.vscode/

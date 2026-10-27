@@ -22,14 +22,29 @@
 namespace seatmesh {
 
 // ---------- 常量（与 protos/scheduler.proto 绑定，代码不得另立） ----------
+// 语义对齐真实校园图书馆选座系统（平行实现，不连接任何真实系统）。
 constexpr int    kSlotsPerDay    = 64;
 constexpr int    kSlotMinutes    = 15;
-constexpr int    kDayStartMin    = 7 * 60;            // 07:00
+constexpr int    kDayStartMin    = 6 * 60;            // 06:00 营业开始
+constexpr int    kDayEndMin      = 22 * 60;           // 22:00（16h = 64 片）
 constexpr int    kRollingDays    = 14;                // day_off ∈ [0,13]
-constexpr int    kMaxSlotsPerReq = 16;                // 单次最多 4 小时
-constexpr int64_t kCheckinGraceMs = 15 * 60 * 1000;   // 签到窗口 = 开始+15min
-constexpr int64_t kGrantTtlMs     = 60 * 1000;        // 候补授权期
-constexpr int64_t kSagaTimeoutMs  = 30 * 1000;        // 跨区配额确认
+constexpr int    kMaxSlotsPerReq = 16;                // 单次最多 4 小时；0..960 = 全天资格
+// 入馆资格：申请成功后 30min 内入馆刷卡；当日 08:00 前的申请保留至当日 08:30
+constexpr int64_t kEntryGraceMs         = 30 * 60 * 1000;
+constexpr int64_t kMorningHoldUntilMs   = (8 * 60 + 30) * 60 * 1000;  // 当日 08:30（绝对时刻由引擎按日锚点换算）
+constexpr int64_t kMorningApplyBeforeMs = 8 * 60 * 60 * 1000;         // 当日 08:00
+// 中途离开保留期：11:00–13:00 / 17:00–19:00 为 60min，其余 30min
+constexpr int64_t kBreakawayKeepMs     = 30 * 60 * 1000;
+constexpr int64_t kBreakawayKeepPeakMs = 60 * 60 * 1000;
+constexpr int    kBreakawayPeakOpenMin  = 11 * 60;
+constexpr int    kBreakawayPeakCloseMin = 13 * 60;    // 第二段 17:00–19:00 由引擎按同规则判断
+// 取消/爽约后 30min 冷却；爽约（NO_SHOW）当日不可再线上申请（网关硬规则）
+constexpr int64_t kCancelCooldownMs = 30 * 60 * 1000;
+constexpr int    kApplyOpenMin  = 6 * 60;             // 06:00 开放申请
+constexpr int    kApplyCloseMin = 21 * 60 + 45;       // 21:45 截止
+// 扩展（本系统特有，馆方无对应机制）
+constexpr int64_t kGrantTtlMs    = 60 * 1000;         // 候补授权期
+constexpr int64_t kSagaTimeoutMs = 30 * 1000;         // 跨区配额确认
 
 // ---------- 事件（日志与 apply 的唯一记录类型） ----------
 enum class EventType : uint8_t {
