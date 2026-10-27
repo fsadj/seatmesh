@@ -1,0 +1,21 @@
+# 本仓库只包含代码与契约；设计文档不入库
+docs/
+
+.DS_Store
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# 运行产物
+*.db
+*.db-wal
+*.db-shm
+*.log
+ai/models/
+
+# 前端
+node_modules/

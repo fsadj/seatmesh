@@ -1,0 +1,187 @@
+syntax = "proto3";
+package scheduler.v2;
+// ============================================================
+// SeatMesh v2 契约 —— 冻结版（含终审增补）。修改规则：field 编号
+// 只增不删；语义变更需两端评审 + epoch +1。
+//
+// 全局常量（与本文件绑定，代码不得另立常量）：
+//   时间粒度 15min；运营时间 07:00–23:00；SLOTS_PER_DAY = 64
+//   bit i 表示 [07:00+15i, 07:00+15(i+1))
+//   day_off ∈ [0,13]（0=今天）；ROLLING_DAYS = 14
+//   CHECKIN_GRACE = 15min；签到窗口 = [时段开始, 开始+15min)，不允许提前签到
+//   GRANT_TTL = 60s（推送→解锁→点击的实测反应预算 10–20s，5s 产品上不可用）
+//   SAGA_TIMEOUT = 30s（跨区配额确认，独立于签到窗口）
+//   CHECKOUT：允许提前签退，剩余时段立即释放并进入等待队列授权
+//   信用规则：按时完成 +1 / 提前签退 0 / 开始前取消 0 / 爽约 -10
+//   MAX_SLOTS_PER_REQ = 16（单次最多预约 4 小时）
+//   单用户全局活跃预约数 = 1（Saga 强制）
+//   region_id：A校区=0，B校区=1
+//
+// 传输：写请求走 ZMQ DEALER→ROUTER（protobuf 二进制）；
+//       事件流走 PUB，首字节为 region_id 作订阅前缀；
+//       非 leader 节点对写请求回 Redirect（帧类型 0x01）。
+// 幂等：所有写请求携带 request_id(UUIDv4)，引擎 LRU 去重（上限 10 万条），
+//       网关超时重试安全；重放返回 E_IDEMPOTENT_REPLAY + 原结果。
+// 读己之写：写响应携带 applied_seq；客户端后续查询携带 min_applied_seq，
+//       网关副本水位不足时等待或带 staleness 标注应答。
+// ============================================================
+
+// ---------- 通用 ----------
+message RequestHeader {
+  string request_id = 1;   // UUIDv4，幂等键
+  int64  user_id    = 2;
+  string trace_id   = 3;   // 16B hex，贯穿 网关→引擎→事件流
+  int64  sent_at_ms = 4;   // 仅诊断，不参与仲裁
+}
+
+enum ErrorCode {
+  OK = 0;
+  E_CONFLICT          = 1;  // 时间冲突（conflict_mask 携带详情）
+  E_SHED              = 2;  // 引擎过载，按 backoff_hint_ms 退避
+  E_QUOTA             = 3;  // 配额不足（活跃预约=1 / 信用分不足）
+  E_NOT_FOUND         = 4;
+  E_FORBIDDEN         = 5;  // 操作非本人资源（属主校验）
+  E_WINDOW            = 6;  // 不在可操作窗口（签到/签退/取消时机不对）
+  E_IDEMPOTENT_REPLAY = 7;  // 幂等重放，响应附带原结果
+  E_STALE_ROUTE       = 8;  // 路由表过期，刷新 epoch 重试
+  E_SAGA_TIMEOUT      = 9;
+}
+
+// ---------- 写路径 ----------
+message ReserveReq {
+  RequestHeader header = 1;
+  int32 seat_id   = 2;
+  int32 day_off   = 3;
+  int32 start_min = 4;     // 距 07:00 分钟数，15 的倍数
+  int32 end_min   = 5;     // 不含端点；end-start ≤ 16 片
+  bool  enqueue_if_conflict = 6;  // 冲突时是否加入等待队列
+}
+message ReserveResp {
+  RequestHeader header = 1;
+  oneof result {
+    BookingCreated created  = 2;
+    ConflictDetail conflict = 3;
+    Shed           shed     = 4;   // 引擎过载，客户端按 hint 退避
+  }
+}
+message BookingCreated {
+  string booking_id          = 1;
+  int64  checkin_deadline_ms = 2;  // UNIX ms = 时段开始+15min；超时未签到 → EXPIRED
+  uint64 applied_seq         = 3;  // 本变更事件 seq；读己之写依据
+}
+message ConflictDetail {
+  uint64 conflict_mask = 1;   // 与请求重叠的已占片，前端精确渲染
+  string queue_ticket  = 2;   // 已入等待队列时非空
+  int32  queue_pos     = 3;
+}
+message Shed { int64 backoff_hint_ms = 1; }
+
+message CancelReq  { RequestHeader header = 1; string booking_id = 2; }
+// 语义：仅时段开始前可取消（否则 E_WINDOW）；开始后离场走 Checkout
+message CancelResp { RequestHeader header = 1; bool ok = 2; int64 credit_delta = 3; ErrorCode code = 4; }
+
+message CheckinReq  { RequestHeader header = 1; string booking_id = 2; string qr_token = 3; }
+message CheckinResp { RequestHeader header = 1; bool ok = 2; ErrorCode code = 3; }
+
+// 提前签退：释放剩余时段（进等待队列授权流程），信用 0；窗口外返回 E_WINDOW
+message CheckoutReq  { RequestHeader header = 1; string booking_id = 2; }
+message CheckoutResp { RequestHeader header = 1; bool ok = 2; uint64 released_mask = 3; ErrorCode code = 4; }
+
+message GrantClaimReq  { RequestHeader header = 1; string queue_ticket = 2; }
+message GrantClaimResp { RequestHeader header = 1; bool ok = 2; string booking_id = 3; ErrorCode code = 4; }
+
+message AdminFreezeReq {   // 封楼等管理指令——也走日志，自动获得全序与持久化
+  RequestHeader header = 1;
+  int32 building_id = 2; int32 day_off = 3; uint64 mask = 4; string reason = 5;
+}
+message AdminResp { RequestHeader header = 1; bool ok = 2; ErrorCode code = 3; }
+
+// ---------- Leader 发现 ----------
+// 组内任意节点受理连接；非 leader 收到写请求直接回 Redirect（帧类型 0x01）。
+// 网关缓存 leader_hint（TTL 5s）；hint 失效按组员列表轮询。
+message Redirect { string leader_hint = 1; uint64 term = 2; }
+
+// ---------- 读路径 ----------
+// 常规查询由网关本地位图副本直接应答（见 docs/03），不打引擎。
+// 仅当需要线性一致读时使用 LeaseRead（默认不用）。
+message LeaseReadReq  { RequestHeader header = 1; int32 seat_id = 2; int32 day_off = 3; }
+message LeaseReadResp { RequestHeader header = 1; uint64 bits = 2; uint64 applied_index = 3; }
+
+// ---------- 副本冷启动 / 缺口恢复 ----------
+// 网关重连先按 last_seq 续传 PUB；检测到 seq 跳跃 → 抖动 0–5s 后 SnapshotPull
+// （防重连惊群）；拉取期间副本标记 DEGRADED，查询响应带 staleness 标注。
+message SnapshotPullReq  { RequestHeader header = 1; uint64 since_seq = 2; }
+message SeatBits         { int32 seat_id = 1; int32 day_off = 2; uint64 bits = 3; }
+message SnapshotPullResp { RequestHeader header = 1; uint64 snapshot_seq = 2; repeated SeatBits seats = 3; }
+
+// ---------- 事件流（引擎 PUB → 网关/大屏/AI/审计器 SUB） ----------
+message Event {
+  uint64 seq        = 1;   // 全局单调递增；断线按此续传，无空洞
+  uint64 raft_index = 2;   // 产生该事件的日志下标（审计）
+  string trace_id   = 3;
+  int64  ts_ms      = 4;
+  int32  region_id  = 5;
+  int32  shard_id   = 6;   // v1 恒 0；v2 分片后全序 = (region_id, shard_id, seq)
+  oneof payload {
+    SeatChanged      seat_changed      = 10;
+    BookingCreated   booking_created   = 11;
+    BookingRejected  booking_rejected  = 12;
+    BookingCancelled booking_cancelled = 13;
+    BookingExpired   booking_expired   = 14;   // 签到窗口超时
+    BookingCheckedIn booking_checked_in = 15;
+    BookingCheckedOut booking_checked_out = 16; // 提前签退，含释放的剩余时段
+    BookingDone      booking_done      = 17;
+    GrantOffered     grant_offered     = 18;
+    GrantExpired     grant_expired     = 19;
+    AdminFreeze      admin_freeze      = 20;
+    RouteTableEpoch  route_epoch       = 21;
+    SagaCmd          saga_cmd          = 22;
+  }
+}
+message SeatChanged {
+  int32 seat_id = 1; int32 day_off = 2;
+  uint64 bits   = 3;   // 变更后的完整位图；副本直接覆盖，无需 delta 合并
+}
+message BookingRejected {
+  int64 user_id = 1; int32 seat_id = 2; int32 day_off = 3;
+  uint64 conflict_mask = 4;
+  ErrorCode code = 5;  // CONFLICT | SHED | QUOTA
+  string detail  = 6;  // 人类可读补充
+}
+message BookingCancelled { string booking_id = 1; int64 user_id = 2; int64 credit_delta = 3; }
+message BookingExpired   { string booking_id = 1; int64 user_id = 2; int64 credit_penalty = 3; }
+message BookingCheckedIn { string booking_id = 1; }
+message BookingCheckedOut {
+  string booking_id = 1; int64 user_id = 2;
+  uint64 released_mask = 3;   // 释放的剩余时段 → 等待队列授权流程
+}
+message BookingDone      { string booking_id = 1; }
+message GrantOffered {          // 等待队列授权：位图保持置位，旁人偷不走
+  string queue_ticket = 1; int64 user_id = 2;
+  int32 seat_id = 3; int32 day_off = 4; uint64 mask = 5;
+  int64 grant_deadline_ms = 6;  // now + GRANT_TTL(60s)
+}
+message GrantExpired { string queue_ticket = 1; int32 next_queue_pos = 2; }
+message AdminFreeze { int32 building_id = 1; int32 day_off = 2; uint64 mask = 3; string reason = 4; }
+message RouteTableEpoch { uint64 epoch = 1; map<int32, int32> building_to_region = 2; }
+
+// ---------- Saga：跨区域用户配额（座位区域 ↔ 用户区域） ----------
+message SagaCmd {
+  string saga_id = 1;      // 幂等键
+  oneof step {
+    SagaHoldUser   hold_user  = 2;   // T2：用户区域冻结配额
+    SagaConfirm    confirm    = 3;   // T3：提交
+    SagaCompensate compensate = 4;   // 补偿：释放配额
+  }
+}
+message SagaHoldUser   { int64 user_id = 1; string booking_ref = 2; int64 timeout_ms = 3; }  // ≤ SAGA_TIMEOUT
+message SagaConfirm    { string booking_ref = 1; }
+message SagaCompensate { string booking_ref = 1; string cause = 2; }
+
+// ---------- 信用分（控制面消费事件结算；引擎不仲裁信用） ----------
+message CreditEntry {
+  int64  user_id    = 1;
+  int64  delta      = 2;   // 按时完成 +1；提前签退 0；开始前取消 0；爽约 -10
+  string booking_id = 3;
+  uint64 event_seq  = 4;   // 来源事件 seq，结算幂等的依据
+}
