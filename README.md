@@ -44,6 +44,11 @@ gateway/   Python：contracts 契约 / Mock 引擎 / ZMQ 客户端 / 信用分�
 - `engine/include/engine/contracts.hpp` —— C++ 抽象接口
 - `gateway/contracts.py` —— Python 抽象接口
 
+## 参与开发
+
+组员请先读 [CONTRIBUTING.md](CONTRIBUTING.md)（开发手册：环境搭建、fork+PR 流程、
+分支规范、契约变更流程），再领取各自的任务包。`main` 分支受保护，只接受 PR 合并。
+
 ## License
 
 MIT
