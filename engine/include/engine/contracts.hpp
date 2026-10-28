@@ -7,7 +7,7 @@
 //     禁止 include zmq / sqlite / protobuf —— 具体技术只出现在
 //     src/storage 与 src/adapters，由 src/main.cpp（组合根）装配。
 //  2. 修改本文件 = 修改契约：M9 汇总、M1+M4 签字、契约测试回归、epoch+1。
-//  3. 时间一律 UNIX 毫秒；位运算语义遵循 docs/00 时间轴（07:00-23:00，
+//  3. 时间一律 UNIX 毫秒；位运算语义遵循 docs/00 时间轴（06:00-22:00，
 //     15min/片，每天 64 片，一个座位一天 = 一个 uint64）。
 //  4. append 在事件持久后通过 set_apply 回调投递：单机实现同步调用，
 //     共识实现（RaftLog）在多数派 commit 后调用——apply 是唯一线性化点。
@@ -48,9 +48,9 @@ constexpr int64_t kSagaTimeoutMs = 30 * 1000;         // 跨区配额确认
 
 // ---------- 事件（日志与 apply 的唯一记录类型） ----------
 enum class EventType : uint8_t {
-  RESERVE = 1, CANCEL, CHECKIN, CHECKOUT, EXPIRE,
+  RESERVE = 1, CANCEL, CHECKIN, CHECKOUT, NO_SHOW,
   GRANT_OFFER, GRANT_CLAIM, GRANT_EXPIRE,
-  FREEZE, SAGA, SYSTEM
+  FREEZE, SAGA, SYSTEM, BREAKAWAY = 12, RETURN = 13
 };
 
 struct Event {
@@ -60,7 +60,7 @@ struct Event {
   int64_t    user_id = 0;
   int32_t    seat_id = -1;
   int32_t    day_off = -1;
-  int32_t    start_min = -1;       // 距 07:00 的分钟，15 的倍数
+  int32_t    start_min = -1;       // 距 06:00 的分钟，15 的倍数
   int32_t    end_min = -1;         // 不含端点
   uint64_t   mask = 0;             // 涉及的时间片
   uint64_t   released_mask = 0;    // CHECKOUT：释放的剩余时段

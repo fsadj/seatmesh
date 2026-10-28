@@ -30,7 +30,7 @@ std::vector<Event> sample_events() {
   e1.type = EventType::RESERVE;
   e1.start_min = 120;
   e1.end_min = 240;
-  auto m = mask_for(120, 240);  // 相对 07:00：120 = 09:00
+  auto m = mask_for(120, 240);  // 相对 06:00：120 = 08:00
   if (!m) {
     std::cerr << "FATAL: mask_for invalid\n";
     std::exit(2);
@@ -44,7 +44,7 @@ std::vector<Event> sample_events() {
   e3.booking_id = "B2";
   e3.released_mask = e1.mask >> 4;
   Event e4 = base();
-  e4.type = EventType::EXPIRE;
+  e4.type = EventType::NO_SHOW;
   e4.booking_id = "B9";
   Event e5 = base();
   e5.type = EventType::CANCEL;

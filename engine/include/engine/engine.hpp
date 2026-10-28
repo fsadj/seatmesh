@@ -39,7 +39,7 @@ class Engine {
   Outcome handle_checkin(const Event& req);
   Outcome handle_checkout(const Event& req);
 
-  // 周期驱动：到期定时器 → 产生 EXPIRE 事件走日志仲裁
+  // 周期驱动：到期定时器 → 产生 NO_SHOW 事件走日志仲裁
   void tick();
 
   // 入站分发（main 循环调用）

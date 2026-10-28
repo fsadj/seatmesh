@@ -9,7 +9,7 @@
 
 namespace seatmesh {
 
-// [start_min, end_min) → 位掩码。start_min 为距 07:00 的分钟（与 proto 一致），
+// [start_min, end_min) → 位掩码。start_min 为距 06:00 的分钟（与 proto 一致），
 // 要求 15 的倍数、落在营业时段内、≤16 片。
 inline std::optional<uint64_t> mask_for(int start_min, int end_min) {
   const int total = kSlotsPerDay * kSlotMinutes;  // 960 = 16h

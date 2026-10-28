@@ -62,7 +62,7 @@ class ReserveRequest:
     user_id: int
     seat_id: int
     day_off: int
-    start_min: int           # 距 07:00 分钟数，15 的倍数
+    start_min: int           # 距 06:00 分钟数，15 的倍数
     end_min: int             # 不含端点
     enqueue_if_conflict: bool = False
     trace_id: str = ""
@@ -80,7 +80,7 @@ class Outcome:
 class Event:
     seq: int                 # 全局单调递增；断线按此续传
     ts_ms: int
-    type: str                # RESERVE/CANCEL/CHECKIN/CHECKOUT/EXPIRE/...
+    type: str                # RESERVE/CANCEL/CHECKIN/CHECKOUT/NO_SHOW/BREAKAWAY/...
     booking_id: str = ""
     user_id: int = 0
     seat_id: int = -1

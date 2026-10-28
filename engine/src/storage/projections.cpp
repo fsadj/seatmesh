@@ -17,7 +17,7 @@ const char* type_name(EventType t) {
     case EventType::CANCEL: return "CANCEL";
     case EventType::CHECKIN: return "CHECKIN";
     case EventType::CHECKOUT: return "CHECKOUT";
-    case EventType::EXPIRE: return "EXPIRE";
+    case EventType::NO_SHOW: return "NO_SHOW";
     case EventType::GRANT_OFFER: return "GRANT_OFFER";
     case EventType::GRANT_CLAIM: return "GRANT_CLAIM";
     case EventType::GRANT_EXPIRE: return "GRANT_EXPIRE";
@@ -119,8 +119,8 @@ class SqliteProjection final : public IProjectionSink {
         set_state(e, "DONE");
         if (e.released_mask == 0) credit(e, +1);  // 按时完成
         break;
-      case EventType::EXPIRE:
-        set_state(e, "EXPIRED");
+      case EventType::NO_SHOW:
+        set_state(e, "NO_SHOW");
         credit(e, -10);  // 爽约
         break;
       default:

@@ -129,7 +129,7 @@ void Engine::tick() {
     timer_tag_to_booking_.erase(it);
     if (t.tag.rfind("expire:", 0) == 0) {
       Event e;
-      e.type = EventType::EXPIRE;
+      e.type = EventType::NO_SHOW;
       e.booking_id = booking_id;
       append_and_apply(e);  // 超时也走日志仲裁：apply 幂等复核
     }
@@ -237,7 +237,7 @@ void Engine::apply(const Event& raw, uint64_t index) {
       }
       break;
     }
-    case EventType::EXPIRE: {
+    case EventType::NO_SHOW: {
       Booking* b = find_booking(ev.booking_id);
       if (b && b->state == BookingState::PENDING_ENTRY && ev.ts_ms >= b->deadline_ms) {
         board_.release(b->seat_id, b->day_off, b->mask);
@@ -249,9 +249,11 @@ void Engine::apply(const Event& raw, uint64_t index) {
     case EventType::GRANT_OFFER:
     case EventType::GRANT_CLAIM:
     case EventType::GRANT_EXPIRE:
+    case EventType::BREAKAWAY:
+    case EventType::RETURN:
     case EventType::FREEZE:
     case EventType::SAGA:
-      // TODO(M1, P2)：等待队列授权 / 封楼 / Saga（docs/01 §2、docs/03 §3）
+      // TODO(M1/M5, P2)：等待队列授权 / 中途离开保留期 / 封楼 / Saga
       last_outcome_ = Outcome{false, "", 0, "NOT_IMPLEMENTED"};
       break;
     case EventType::SYSTEM:

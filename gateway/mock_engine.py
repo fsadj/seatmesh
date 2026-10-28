@@ -188,7 +188,7 @@ class MockEngine:
                     self._seq += 1
                     self._apply_bits(b.day_off, b.seat_id, b.mask, set=False)
                     b.state = "NO_SHOW"  # 超时未入馆：信用 -10 + 当日禁约（网关硬规则）
-                    self._publish("EXPIRE", b.user_id, booking_id=b.id)
+                    self._publish("NO_SHOW", b.user_id, booking_id=b.id)
                     self._publish_seat_changed(b.day_off, b.seat_id)
                     n += 1
         return n
@@ -214,8 +214,8 @@ class MockEngine:
 
     def _consumed_slots(self, b: _Booking, now_ms: int) -> int:
         """签退时点已消耗的时间片数（含当前片的剩余，立即释放给候补）。"""
-        day_anchor = self._day0 + b.day_off * DAY_MS  # 该营业日的 07:00
-        m = (now_ms - day_anchor) // 60_000           # 距 07:00 的分钟
+        day_anchor = self._day0 + b.day_off * DAY_MS  # 该营业日的 06:00
+        m = (now_ms - day_anchor) // 60_000           # 距 06:00 的分钟
         if m <= 0:
             return 0
         total = 64 * 15
