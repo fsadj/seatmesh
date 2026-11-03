@@ -6,7 +6,7 @@
   提前签退释放剩余片。
 线程安全：1000 线程并发抢 1 座恰好 1 人成功（demo_contract.py 验证）。
 
-TODO(M4)：C++ 引擎联调通过后，生产路径切换 ZmqEngineClient，本类仅留测试。
+TODO(T3)：C++ 引擎联调通过后，生产路径切换 ZmqEngineClient，本类仅留测试。
 """
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ class MockEngine:
                 return Outcome(False, detail="E_NOT_FOUND")
             if b.state != "PENDING_ENTRY" or self._clock() >= b.start_ms:
                 return Outcome(False, booking_id, detail="E_WINDOW")
-            # TODO(M5, P2)：取消后 30min 冷却（CANCEL_COOLDOWN_MS，网关前置校验）
+            # TODO(T4, P2)：取消后 30min 冷却（CANCEL_COOLDOWN_MS，网关前置校验）
             self._seq += 1
             self._apply_bits(b.day_off, b.seat_id, b.mask, set=False)
             b.state = "CANCELLED"  # 信用 0（控制面结算）
@@ -174,7 +174,7 @@ class MockEngine:
             if b is None:
                 return Outcome(False, detail="E_NOT_FOUND")
             if b.state != "IN_LIBRARY":
-                # TODO(M1, P2)：BREAKAWAY（中途离开保留期）路径
+                # TODO(T1, P2)：BREAKAWAY（中途离开保留期）路径
                 return Outcome(False, booking_id, detail="E_WINDOW")
             self._seq += 1
             consumed = self._consumed_slots(b, self._clock())

@@ -1,7 +1,7 @@
 """SeatMesh 网关侧全局契约（Python）。
 
 与 engine/include/engine/contracts.hpp 一一对应；两端常量、字段、语义绑定。
-修改 = 修改契约：M9 汇总、M1+M4 签字、契约测试回归、epoch+1。
+修改 = 修改契约：T5 汇总、T1+T3 签字、契约测试回归、epoch+1。
 
 依赖反转规则：网关/控制面/大屏只依赖本文件的 Protocol；
 具体实现（ZMQ 版 / Mock 版 / SQLite 版 / 内存版）在各自模块中，装配点在应用入口。

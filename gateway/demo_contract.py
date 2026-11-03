@@ -1,6 +1,6 @@
 """契约演示：MockEngine 全语义走查 + 并发 0 超卖 + 副本视图 + 信用幂等。
 运行：python3 gateway/demo_contract.py
-（M4/M5/M6 在 C++ 引擎联调前，用 MockEngine 开发全部上层逻辑。）
+（T3/T4 在 C++ 引擎联调前，用 MockEngine 开发全部上层逻辑。）
 """
 from __future__ import annotations
 

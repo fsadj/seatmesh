@@ -434,7 +434,7 @@ void Engine::restore_state(const std::string& s) {
     arm_timers_for(b);  // HELD 单恢复后重挂签到超时
   }
   (void)n_seats;
-  idempotent_.clear();  // TODO(M2, P2)：幂等表入快照，避免重启后重复键失忆
+  idempotent_.clear();  // TODO(T1, P1)：幂等表入快照，避免重启后重复键失忆
 }
 
 }  // namespace seatmesh

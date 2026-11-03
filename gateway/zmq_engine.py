@@ -31,7 +31,7 @@ class ZmqEngineClient:
         self._sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
         for ep in endpoints:
             self._sock.connect(ep)
-        self._leader_hint = endpoints[0]  # TODO(M4)：Redirect 缓存 + TTL
+        self._leader_hint = endpoints[0]  # TODO(T3)：Redirect 缓存 + TTL
 
     def close(self) -> None:
         self._sock.close(0)

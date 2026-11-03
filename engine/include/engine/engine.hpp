@@ -92,7 +92,7 @@ class Engine {
   bool recovering_ = false;       // 重放期间不对外发布
 
   std::unordered_map<std::string, Booking> bookings_;       // id → 单
-  std::unordered_map<std::string, std::string> idempotent_; // request_id → booking_id（LRU 化是 M2 的 P2 项）
+  std::unordered_map<std::string, std::string> idempotent_; // request_id → booking_id（LRU 化是 T1 的阶段一任务）
   std::unordered_map<uint64_t, std::string> timer_tag_to_booking_;
 
   Outcome last_outcome_;         // apply 同步填写的应答（单线程事件循环语义）

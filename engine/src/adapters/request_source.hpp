@@ -78,7 +78,7 @@ class ReplaySource final : public IRequestSource {
   bool exhausted_ = false;
 };
 
-// TODO(M2/M4, W1)：ZMQ ROUTER 版本，帧 = [sender][payload]，
+// TODO(T1/T3)：ZMQ ROUTER 版本，帧 = [sender][payload]，
 // 与网关 DEALER 池对接（protos/scheduler.proto 传输章节）。
 class ZmqRouterSource final : public IRequestSource {
  public:

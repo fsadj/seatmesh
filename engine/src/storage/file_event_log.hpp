@@ -4,7 +4,7 @@
 //   | magic 'S''M' (2B) | type (1B) | ver (1B) | len (4B) |
 //   | crc32 (4B, 覆盖 payload) | payload (len B, event_codec 编码) |
 // 快照：snapshot.bin（引擎状态）+ snapshot.meta（文本，首行 = 快照时的 log index）。
-// TODO(M2, P2)：snapshot 后 WAL 轮转（compaction），避免无限增长。
+// TODO(T1, P1)：snapshot 后 WAL 轮转（compaction），避免无限增长。
 #include "engine/contracts.hpp"
 
 #include <cstdio>

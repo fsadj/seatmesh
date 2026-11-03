@@ -64,7 +64,7 @@ Makefile   build-engine / test-engine / demo-engine / demo-python
 ## 3. 分支与提交规范
 
 - `main` 受保护：**只接受 PR 合并**，禁止直接 push（即使有权限也请走 PR）。
-- 分支命名：`p<阶段>-m<席位>-<主题>`，例如 `p1-m4-auth`、`p2-m1-grant-queue`。
+- 分支命名：`p<阶段>-t<包>-<主题>`，例如 `p1-t3-auth`、`p2-t1-grant-queue`。
 - 一个分支只做一件事；做完即发 PR，不留长期分支。
 - 提交信息：第一行 ≤50 字说清做了什么，正文补充动机：
   ```
@@ -83,7 +83,7 @@ git merge --ff-only upstream/main
 git push origin main          # 同步你自己的 fork
 
 # ② 建任务分支
-git checkout -b p1-m4-auth
+git checkout -b p1-t3-auth
 
 # ③ 开发，小步提交
 git add -p                    # 逐块确认，不要 git add .
@@ -93,13 +93,13 @@ git commit -m "..."
 make test-engine && make demo-python
 
 # ⑤ 推送并发 PR
-git push origin p1-m4-auth
+git push origin p1-t3-auth
 # 打开 GitHub，点 Compare & pull request
 ```
 
 **PR 必须包含**：
 
-- 标题：`[P1-M4] 网关鉴权与限流`（阶段-席位-主题）；
+- 标题：`[P1-T3] 网关鉴权与限流`（阶段-任务包-主题）；
 - 描述：做了什么、为什么、对应任务包编号；
 - **验收截图**：DoD 命令的输出贴在 PR 描述里——任务包规则，没有截图不予评审；
 - 关联 issue（如有）。
@@ -125,7 +125,7 @@ git push origin p1-m4-auth
 **想改契约**（加字段、改语义、改常量）：
 
 1. 开 issue 描述动机与方案；
-2. 契约管理员（M9）汇总，组织双端评审（引擎侧 M1 + 网关侧 M4）；
+2. 契约管理员（T5）汇总，组织双端评审（引擎侧 T1 + 网关侧 T3）；
 3. 双端签字后：field 编号只增不删，更新三层契约与 `epoch+1`；
 4. 契约测试（`make test-engine` + `make demo-python`）回归通过方可合并。
 
@@ -147,16 +147,17 @@ git push origin p1-m4-auth
   `src/storage`、`src/adapters`）；每个 public 接口带注释说明语义与边界。
 - **Python**：类型标注（公开函数必须有）；标准库优先，新增第三方依赖需在 PR 里说明理由
   并更新 `requirements.txt`；模块头注释写明职责与消费方。
-- **目录所有权**：`engine/` 评审人 M1/M2/M3 之一；`gateway/` 评审人 M4/M5；
-  契约文件评审人 M9 + 双端各一人。
+- **评审归属**：PR 的评审人是该目录的包 owner——`engine/`→T1、`raft/`→T2、
+  `gateway/`→T3、控制面与前端→T4、`sre/`/`ai/`/契约文件→T5；
+  跨包接口改动由双方共同评审，契约文件另需契约管理员签字。
 - 提交前自查：没有调试 print、没有注释掉的死代码、没有与本次任务无关的改动混入。
 
 ## 9. 沟通与节奏
 
-- **周五站会（30 分钟）**：每人 3 分钟——上周完成 / 本周计划 / 卡点。
-  卡点格式："谁-什么-需要什么"（例：M6-M4-座位 API 的 stale 字段还没合）。
+- 进度与节奏由组长统一跟进；包内卡点**随时**在群里提，格式："谁-什么-需要什么"
+  （例：T4-T3-座位 API 的 stale 字段还没合）。
 - **迭代验收会**（每阶段末）：现场逐条打勾 AC，重跑前序阶段全部 AC。
-- 找人：任务包分册末尾的「依赖关系」就是找谁的正确姿势。
+- 找人：`task-packs/` 各包末尾的「依赖关系」就是找谁的正确姿势。
 
 ## 10. FAQ
 
@@ -164,17 +165,17 @@ git push origin p1-m4-auth
 按 §4 ① 的三条命令同步；有本地分支冲突时先 `git rebase upstream/main` 解决。
 
 **Q：合并冲突怎么解？**
-`git checkout p1-m4-auth && git rebase upstream/main`，逐文件解决后
+`git checkout p1-t3-auth && git rebase upstream/main`，逐文件解决后
 `git rebase --continue`；解决不了带着冲突文件找目录 owner，10 分钟内能理清。
 
 **Q：我改的文件被谁评审？**
-看 §8 目录所有权；拿不准就在 PR 里 `@` 契约管理员（M9）转发。
+看 §8 目录所有权；拿不准就在 PR 里 `@` 契约管理员（T5）转发。
 
 **Q：能不能直接改 main？**
 不能。main 受保护是全组的刹车，不是流程官僚。
 
 **Q：任务包接口规范和代码对不上？**
-以契约文件为准，立刻给 M9 开 issue——这正是契约测试要抓的不一致。
+以契约文件为准，立刻给 T5（契约管理员）开 issue——这正是契约测试要抓的不一致。
 
 ## 11. 命令速查
 
@@ -185,4 +186,4 @@ git push origin p1-m4-auth
 | 引擎回放演示 | `make demo-engine` |
 | Python 契约演示 | `make demo-python` |
 | 同步主仓库 | `git fetch upstream && git merge --ff-only upstream/main` |
-| 起网关（Mock） | `uvicorn app:create_app --factory`（M4 合入后） |
+| 起网关（Mock） | `uvicorn app:create_app --factory`（T3 合入后） |

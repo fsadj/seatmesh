@@ -6,7 +6,7 @@
 //  1. engine 核心只允许 include 本头文件与 C++ 标准库；
 //     禁止 include zmq / sqlite / protobuf —— 具体技术只出现在
 //     src/storage 与 src/adapters，由 src/main.cpp（组合根）装配。
-//  2. 修改本文件 = 修改契约：M9 汇总、M1+M4 签字、契约测试回归、epoch+1。
+//  2. 修改本文件 = 修改契约：T5 汇总、T1+T3 签字、契约测试回归、epoch+1。
 //  3. 时间一律 UNIX 毫秒；位运算语义遵循 docs/00 时间轴（06:00-22:00，
 //     15min/片，每天 64 片，一个座位一天 = 一个 uint64）。
 //  4. append 在事件持久后通过 set_apply 回调投递：单机实现同步调用，

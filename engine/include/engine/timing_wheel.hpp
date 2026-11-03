@@ -1,6 +1,6 @@
 #pragma once
 // ITimerWheel 的 v1 实现：最小堆 + 惰性取消（~O(log n)）。
-// v2 层级时间轮（docs/01 §3）是 M1 的冲刺项，实现同一接口即可替换——依赖反转。
+// v2 层级时间轮（docs/01 §3）是 T1 的冲刺项，实现同一接口即可替换——依赖反转。
 #include "engine/contracts.hpp"
 
 #include <algorithm>

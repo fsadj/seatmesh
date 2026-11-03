@@ -33,7 +33,7 @@ class SeatBoard {
   int n_seats() const { return n_seats_; }
   int rolling_days() const { return rolling_days_; }
 
-  // day_off → 网格下标。注意：date 标签防 ABA 属 M1 的 P2 加固项（docs/01）。
+  // day_off → 网格下标。注意：date 标签防 ABA 属 T1 的阶段二加固项（docs/01）。
   int day_index(int day_off) const {
     int d = day_off % rolling_days_;
     if (d < 0) d += rolling_days_;
