@@ -50,7 +50,9 @@ constexpr int64_t kSagaTimeoutMs = 30 * 1000;         // 跨区配额确认
 enum class EventType : uint8_t {
   RESERVE = 1, CANCEL, CHECKIN, CHECKOUT, NO_SHOW,
   GRANT_OFFER, GRANT_CLAIM, GRANT_EXPIRE,
-  FREEZE, SAGA, SYSTEM, BREAKAWAY = 12, RETURN = 13
+  FREEZE, SAGA, SYSTEM, BREAKAWAY = 12, RETURN = 13,
+  DONE = 14,          // 自然离馆（时段结束未刷卡离馆）→ LEFT(+1)
+  SEAT_CHANGED = 15   // 位图变更伴随事件（副本整字覆盖，与业务事件同 seq）
 };
 
 struct Event {

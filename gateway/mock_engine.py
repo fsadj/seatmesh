@@ -100,6 +100,15 @@ class MockEngine:
             if req.request_id and req.request_id in self._idem:
                 bid = self._idem[req.request_id]
                 return Outcome(bool(bid), bid, detail="E_IDEMPOTENT_REPLAY")
+            now = self._clock()
+            # 过去时段 → 拒绝（堵"预约过去时段刷信用"漏洞）
+            if (self._day0 + req.day_off * DAY_MS + req.end_min * 60_000) <= now:
+                return Outcome(False, detail="E_PARAM")
+            # 单用户活跃预约唯一
+            if any(b.user_id == req.user_id and b.state in
+                   ("PENDING_ENTRY", "GRANTED", "IN_LIBRARY", "BREAKAWAY")
+                   for b in self._bookings.values()):
+                return Outcome(False, detail="E_QUOTA")
             cur = self._bits.get((req.day_off, req.seat_id), 0)
             conflict = cur & mask
             if conflict:  # 预检拒绝：不产生事件（与 C++ 预检一致）
@@ -107,15 +116,17 @@ class MockEngine:
             self._seq += 1
             bid = f"B{self._seq}"
             self._bits[(req.day_off, req.seat_id)] = cur | mask
-            now = self._clock()
             start_ms = (self._day0 + req.day_off * DAY_MS
                         + req.start_min * 60_000)
-            # 入馆资格截止（对齐馆方规则）：当日 08:00 前申请保留至 08:30；
-            # 其余 = max(申请时刻, 时段开始) + 30min
-            if req.day_off == 0 and now < self._day0 + 2 * 3_600_000:
-                deadline = self._day0 + (2 * 60 + 30) * 60_000
-            else:
-                deadline = max(now, start_ms) + ENTRY_GRACE_MS
+            end_ms = start_ms + mask.bit_count() * 900_000
+            # 入馆资格截止（含兜底夹取）：base = 开始+30min；
+            # 当日 08:00 前申请且开始 ≤ 08:30 → 至少保留至 08:30；
+            # 最终 min(base, 时段结束)，截止永不越过时段本身
+            base = start_ms + ENTRY_GRACE_MS
+            if (req.day_off == 0 and now < self._day0 + 2 * 3_600_000
+                    and start_ms <= self._day0 + 2 * 3_600_000 + 1_800_000):
+                base = max(base, self._day0 + 2 * 3_600_000 + 1_800_000)
+            deadline = min(base, end_ms)
             self._bookings[bid] = _Booking(
                 id=bid, user_id=req.user_id, seat_id=req.seat_id,
                 day_off=req.day_off, mask=mask, state="PENDING_ENTRY",
@@ -190,6 +201,21 @@ class MockEngine:
                     b.state = "NO_SHOW"  # 超时未入馆：信用 -10 + 当日禁约（网关硬规则）
                     self._publish("NO_SHOW", b.user_id, booking_id=b.id)
                     self._publish_seat_changed(b.day_off, b.seat_id)
+                    n += 1
+        return n
+
+    def complete_due(self) -> int:
+        """将时段已结束仍处于 IN_LIBRARY 的单置为 LEFT（自然离馆，信用 +1）。"""
+        n = 0
+        with self._lock:
+            now = self._clock()
+            for b in list(self._bookings.values()):
+                if b.state != "IN_LIBRARY":
+                    continue
+                if now >= b.start_ms + b.mask.bit_count() * 900_000:
+                    self._seq += 1
+                    b.state = "LEFT"
+                    self._publish("DONE", b.user_id, booking_id=b.id)
                     n += 1
         return n
 

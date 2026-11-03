@@ -72,6 +72,14 @@ Outcome Engine::handle_reserve(const Event& req) {
   if (!req.request_id.empty() && it != idempotent_.end())
     return Outcome{!it->second.empty(), it->second, 0, "E_IDEMPOTENT_REPLAY"};
 
+  // 时段已整体过去 → 拒绝（堵"预约过去时段刷信用"漏洞）
+  if (start_ms_of(req.day_off, req.end_min) <= clock_->now_ms())
+    return Outcome{false, "", 0, "E_PARAM"};
+
+  // 单用户活跃预约唯一（区域内硬约束；跨区由 Saga+对账兜底）
+  if (has_active_booking(req.user_id))
+    return Outcome{false, "", 0, "E_QUOTA"};
+
   // 预检：冲突直接拒绝，省一次日志写入（最终仲裁仍在 apply）
   if (board_.has_conflict(req.seat_id, req.day_off, *mask))
     return Outcome{false, "", board_.bits(req.seat_id, req.day_off) & *mask,
@@ -127,11 +135,14 @@ void Engine::tick() {
     if (it == timer_tag_to_booking_.end()) continue;
     const std::string booking_id = it->second;
     timer_tag_to_booking_.erase(it);
+    Event e;
+    e.booking_id = booking_id;
     if (t.tag.rfind("expire:", 0) == 0) {
-      Event e;
       e.type = EventType::NO_SHOW;
-      e.booking_id = booking_id;
       append_and_apply(e);  // 超时也走日志仲裁：apply 幂等复核
+    } else if (t.tag.rfind("end:", 0) == 0) {
+      e.type = EventType::DONE;
+      append_and_apply(e);  // 自然离馆：LEFT(+1)
     }
   }
 }
@@ -144,13 +155,20 @@ Outcome Engine::dispatch(const IncomingRequest& req) {
   return Outcome{false, "", 0, "E_PARAM"};
 }
 
-int64_t Engine::entry_deadline_for(int day_off, int64_t start_ms,
-                                   int64_t now_ms) const {
+int64_t Engine::entry_deadline_for(int day_off, int start_min, int end_min,
+                                   int64_t start_ms, int64_t now_ms) const {
   const int64_t day_anchor = day0_start_ms_ +
-      static_cast<int64_t>(day_off) * 86400000LL;                 // 当日 06:00
-  if (day_off == 0 && now_ms < day_anchor + 2 * 3600000LL)        // 08:00 前申请
-    return day_anchor + (2 * 60 + 30) * 60000LL;                  // 保留至 08:30
-  return std::max(now_ms, start_ms) + kEntryGraceMs;
+      static_cast<int64_t>(day_off) * 86400000LL;                  // 当日 06:00
+  const int64_t end_ms = start_ms +
+      static_cast<int64_t>(end_min - start_min) * 60000LL;
+  int64_t base = start_ms + kEntryGraceMs;                         // 开始+30min
+  // 早鸟保留：当日 08:00 前申请、且时段开始 ≤ 08:30 → 至少保留至 08:30
+  const int64_t morning_before = kMorningApplyBeforeMs - kDayStartMin * 60000LL;
+  const int64_t hold_until    = kMorningHoldUntilMs  - kDayStartMin * 60000LL;
+  if (day_off == 0 && now_ms - day_anchor < morning_before &&
+      start_ms <= day_anchor + hold_until)
+    base = std::max(base, day_anchor + hold_until);
+  return std::min(base, end_ms);   // 截止永不越过时段结束（防必然爽约死锁）
 }
 
 // ---------- apply：唯一线性化点 ----------
@@ -159,6 +177,8 @@ void Engine::apply(const Event& raw, uint64_t index) {
   Event ev = raw;           // apply 需补全 seq / booking_id 后再投影与发布
   ev.seq = ++seq_;
   last_outcome_ = Outcome{};
+  bool changed = false;       // 是否发生真实状态迁移（发布守卫）
+  bool seat_mutated = false;  // 位图是否变更（决定是否追发 SeatChanged）
 
   switch (ev.type) {
     case EventType::RESERVE: {
@@ -172,14 +192,19 @@ void Engine::apply(const Event& raw, uint64_t index) {
         b.mask = ev.mask;
         b.state = BookingState::PENDING_ENTRY;
         b.start_ms = start_ms_of(ev.day_off, ev.start_min);
-        b.deadline_ms = entry_deadline_for(ev.day_off, b.start_ms, ev.ts_ms);
+        b.deadline_ms = entry_deadline_for(ev.day_off, ev.start_min,
+                                           ev.end_min, b.start_ms, ev.ts_ms);
         b.seq = ev.seq;
         bookings_[b.id] = b;
         if (!ev.request_id.empty()) idempotent_[ev.request_id] = b.id;
         ev.booking_id = b.id;
         arm_timers_for(b);
+        changed = true;
+        seat_mutated = true;
         last_outcome_ = Outcome{true, b.id, 0, ""};
       } else {
+        // 拒绝也是事件（BookingRejected 语义）：进入事件流供审计与对账
+        changed = true;
         last_outcome_ = Outcome{false, "", conflict, "E_CONFLICT"};
         if (!ev.request_id.empty()) idempotent_[ev.request_id] = "";
       }
@@ -190,7 +215,10 @@ void Engine::apply(const Event& raw, uint64_t index) {
       if (b && b->state == BookingState::PENDING_ENTRY &&
           ev.ts_ms < b->start_ms) {
         board_.release(b->seat_id, b->day_off, b->mask);
+        cancel_timer(b->expire_timer);   // 撤销幽灵 NO_SHOW 定时器
         b->state = BookingState::CANCELLED;  // 信用 0
+        changed = true;
+        seat_mutated = true;
         last_outcome_ = Outcome{true, b->id, 0, ""};
       } else {
         last_outcome_ = Outcome{false, ev.booking_id, 0, "E_WINDOW"};
@@ -198,11 +226,17 @@ void Engine::apply(const Event& raw, uint64_t index) {
       break;
     }
     case EventType::CHECKIN: {
-      // 入馆刷卡：窗口 = [时段开始(或申请时刻), 入馆资格截止]
+      // 入馆刷卡：窗口 = [时段开始, 入馆资格截止]
       Booking* b = find_booking(ev.booking_id);
       if (b && b->state == BookingState::PENDING_ENTRY && ev.ts_ms >= b->start_ms &&
           ev.ts_ms <= b->deadline_ms) {
+        cancel_timer(b->expire_timer);   // 已入馆，撤销 NO_SHOW 定时器（防幽灵扣分）
         b->state = BookingState::IN_LIBRARY;
+        const int64_t end_ms = b->start_ms +
+            static_cast<int64_t>(__builtin_popcountll(b->mask)) * 900000LL;
+        b->end_timer = timers_->schedule(end_ms, "end:" + b->id);
+        timer_tag_to_booking_[b->end_timer] = b->id;   // 自然离馆：LEFT(+1)
+        changed = true;
         last_outcome_ = Outcome{true, b->id, 0, ""};
       } else {
         last_outcome_ = Outcome{false, ev.booking_id, 0, "E_WINDOW"};
@@ -211,11 +245,12 @@ void Engine::apply(const Event& raw, uint64_t index) {
     }
     case EventType::CHECKOUT: {
       Booking* b = find_booking(ev.booking_id);
-      // 提前签退：释放剩余时段（含当前片的剩余部分），交给候补授权流程
+      // 提前/正式离馆：释放剩余时段（含当前片的剩余部分），交给候补授权流程
       if (b && b->state == BookingState::IN_LIBRARY) {
+        cancel_timer(b->end_timer);
         const int64_t day_abs = day0_start_ms_ +
                                 static_cast<int64_t>(b->day_off) * 86400000LL;
-        const int64_t m = (ev.ts_ms - day_abs) / 60000 - kDayStartMin;
+        const int64_t m = (ev.ts_ms - day_abs) / 60000;   // 距当日 06:00 的分钟
         const int consumed = (m <= 0) ? 0
                                       : (m >= kSlotsPerDay * kSlotMinutes
                                              ? kSlotsPerDay
@@ -231,6 +266,8 @@ void Engine::apply(const Event& raw, uint64_t index) {
         const int credit = (ev.ts_ms >= b->start_ms + dur_ms) ? +1 : 0;
         (void)credit;  // 信用结算由控制面消费事件完成；detail 携带 delta
         b->state = BookingState::LEFT;
+        changed = true;
+        seat_mutated = (released != 0);
         last_outcome_ = Outcome{true, b->id, 0, "credit=" + std::to_string(credit)};
       } else {
         last_outcome_ = Outcome{false, ev.booking_id, 0, "E_WINDOW"};
@@ -241,9 +278,27 @@ void Engine::apply(const Event& raw, uint64_t index) {
       Booking* b = find_booking(ev.booking_id);
       if (b && b->state == BookingState::PENDING_ENTRY && ev.ts_ms >= b->deadline_ms) {
         board_.release(b->seat_id, b->day_off, b->mask);
+        cancel_timer(b->expire_timer);
         b->state = BookingState::NO_SHOW;  // 信用 -10（控制面结算）
+        changed = true;
+        seat_mutated = true;
         last_outcome_ = Outcome{true, b->id, 0, "credit=-10"};
-      }  // 否则幂等跳过（tick 与重放竞争时安全）
+      }  // 否则幂等跳过：定时器竞态/重放下的空 NO_SHOW **不发布**（防幽灵扣分）
+      break;
+    }
+    case EventType::DONE: {
+      // 自然离馆：时段结束仍未刷卡离馆 → LEFT(+1)，无剩余片需释放
+      Booking* b = find_booking(ev.booking_id);
+      const int64_t end_ms = b ? b->start_ms +
+          static_cast<int64_t>(__builtin_popcountll(b->mask)) * 900000LL : 0;
+      if (b && b->state == BookingState::IN_LIBRARY && ev.ts_ms >= end_ms) {
+        cancel_timer(b->end_timer);
+        b->state = BookingState::LEFT;
+        changed = true;
+        last_outcome_ = Outcome{true, b->id, 0, "credit=+1"};
+      } else {
+        changed = false;   // 空转不发布
+      }
       break;
     }
     case EventType::GRANT_OFFER:
@@ -253,15 +308,27 @@ void Engine::apply(const Event& raw, uint64_t index) {
     case EventType::RETURN:
     case EventType::FREEZE:
     case EventType::SAGA:
-      // TODO(M1/M5, P2)：等待队列授权 / 中途离开保留期 / 封楼 / Saga
+      // TODO(T1/T4, P2)：等待队列授权 / 中途离开保留期 / 封楼 / Saga
       last_outcome_ = Outcome{false, "", 0, "NOT_IMPLEMENTED"};
       break;
     case EventType::SYSTEM:
+    case EventType::SEAT_CHANGED:
       break;
   }
 
   if (projection_) projection_->on_apply(ev, index);
-  if (!recovering_) publisher_->publish(ev);  // 拒绝与超时同样是事件流的一部分
+  // 发布守卫：只有真实发生状态迁移的事件才进入事件流——
+  // 定时器竞态/重放产生的空 NO_SHOW/DONE 若被发布，信用消费者会误扣分。
+  if (recovering_ || !changed) return;
+  publisher_->publish(ev);
+  if (seat_mutated) {   // 位图变更 → 追发 SeatChanged（同 seq，副本整字覆盖）
+    Event sc = ev;
+    sc.type = EventType::SEAT_CHANGED;
+    sc.user_id = 0;
+    sc.booking_id.clear();
+    sc.mask = board_.bits(ev.seat_id, ev.day_off);
+    publisher_->publish(sc);
+  }
 }
 
 // ---------- 辅助 ----------
@@ -276,8 +343,31 @@ void Engine::arm_timers_for(const Booking& b) {
     const uint64_t id =
         timers_->schedule(b.deadline_ms, "expire:" + b.id);
     timer_tag_to_booking_[id] = b.id;
+  } else if (b.state == BookingState::IN_LIBRARY) {
+    const int64_t end_ms = b.start_ms +
+        static_cast<int64_t>(__builtin_popcountll(b.mask)) * 900000LL;
+    const uint64_t id = timers_->schedule(end_ms, "end:" + b.id);
+    timer_tag_to_booking_[id] = b.id;
   }
-  // TODO(M1, P2)：GRANTED 状态挂授权期定时器 "grant:<id>"
+  // TODO(T1, P2)：GRANTED 状态挂授权期定时器 "grant:<id>"
+}
+
+bool Engine::has_active_booking(int64_t user_id) const {
+  for (const auto& [id, b] : bookings_)
+    if (b.user_id == user_id &&
+        (b.state == BookingState::PENDING_ENTRY ||
+         b.state == BookingState::GRANTED ||
+         b.state == BookingState::IN_LIBRARY ||
+         b.state == BookingState::BREAKAWAY))
+      return true;
+  return false;
+}
+
+void Engine::cancel_timer(uint64_t& timer_id) {
+  if (!timer_id) return;
+  timers_->cancel(timer_id);
+  timer_tag_to_booking_.erase(timer_id);
+  timer_id = 0;
 }
 
 std::string Engine::serialize_state() const {

@@ -68,9 +68,15 @@ class Engine {
            static_cast<int64_t>(day_off) * 86400000LL +
            static_cast<int64_t>(start_min) * 60000LL;
   }
-  // 入馆资格截止（对齐馆方规则）：当日 08:00 前的申请（仅 day_off==0）
-  // 保留至当日 08:30；其余 = max(申请时刻, 时段开始) + 30min。
-  int64_t entry_deadline_for(int day_off, int64_t start_ms, int64_t now_ms) const;
+  // 入馆资格截止（对齐馆方规则 + 兜底夹取）：
+  //   base = 时段开始 + 30min；
+  //   当日 08:00 前申请且时段开始 ≤ 08:30 → 至少保留至当日 08:30；
+  //   最终 min(base, 时段结束)——截止永不越过时段本身（防"必然爽约"死锁）。
+  int64_t entry_deadline_for(int day_off, int start_min, int end_min,
+                             int64_t start_ms, int64_t now_ms) const;
+  // 单用户活跃预约唯一（区域内硬约束；跨区由 Saga+对账兜底）
+  bool   has_active_booking(int64_t user_id) const;
+  void   cancel_timer(uint64_t& timer_id);
   Booking* find_booking(const std::string& id);
 
   EngineConfig cfg_;

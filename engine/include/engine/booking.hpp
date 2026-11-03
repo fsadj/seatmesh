@@ -52,6 +52,8 @@ struct Booking {
   int64_t      start_ms = 0;        // 时段开始（UNIX ms）
   int64_t      deadline_ms = 0;     // PENDING_ENTRY=入馆截止 / GRANTED=授权截止
   uint64_t     seq = 0;             // 创建事件 seq（确定性 ID 的来源）
+  uint64_t     expire_timer = 0;    // 入馆截止定时器（终态迁移时必须撤销）
+  uint64_t     end_timer = 0;       // 自然离馆定时器（时段结束 → LEFT+1）
 };
 
 }  // namespace seatmesh

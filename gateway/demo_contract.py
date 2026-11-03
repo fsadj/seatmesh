@@ -76,6 +76,33 @@ def main() -> None:
     assert credit.balance(2000) == -10
     print("[信用] 同一事件重复消费不重复扣分，余额正确")
 
+    # ---- 场景五：业务演练修订回归（过去时段 / 活跃唯一 / 早鸟保留不死锁） ----
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    day0 = (now_ms // 86_400_000) * 86_400_000 + 6 * 3_600_000   # 当日 06:00
+    eng0 = MockEngine(n_seats=10, clock=lambda: day0 + 3_600_000)  # 固定当日 07:00
+
+    past = eng0.reserve(ReserveRequest("x1", 3001, 1, 0, 0, 45))     # 06:00-06:45 已过
+    assert not past.ok and past.detail == "E_PARAM", past
+
+    fut = eng0.reserve(ReserveRequest("x2", 3001, 2, 1, 120, 240))   # 明天 08:00-10:00
+    assert fut.ok and fut.booking_id == "B1", fut
+    dup = eng0.reserve(ReserveRequest("x3", 3001, 3, 1, 120, 240))   # 已有活跃预约
+    assert not dup.ok and dup.detail == "E_QUOTA", dup
+
+    aft = eng0.reserve(ReserveRequest("x4", 3002, 2, 0, 480, 600))   # 他人约今天 14:00-16:00
+    assert aft.ok, aft
+    b2 = eng0._bookings["B2"]
+    # 下午场不适用早鸟保留：截止 = 开始+30min，且永不早于时段开始（死锁修复验证）
+    assert b2.deadline_ms == b2.start_ms + 1_800_000 and b2.deadline_ms >= b2.start_ms, \
+        "早鸟保留把截止压到时段开始之前（死锁）"
+
+    m = eng0.reserve(ReserveRequest("x5", 3003, 4, 0, 90, 180))      # 今天 07:30-09:00
+    assert m.ok, m
+    b3 = eng0._bookings["B3"]
+    assert b3.start_ms <= b3.deadline_ms <= b3.start_ms + 5_400_000  # 截止=08:30、夹在时段内
+    print("[演练] 过去时段拒绝 / 活跃唯一 / 早鸟保留截止=08:30 且不越过时段 — 全部正确")
+
     print("RESULT: ALL PASS")
 
 
