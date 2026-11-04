@@ -38,6 +38,8 @@ inline uint32_t crc32(const void* data, size_t n) {
 //   [41..48] mask u64       [49..56] released_mask u64
 //   随后 5 个字符串（u16 长度 + 字节）：
 //   request_id, booking_id, queue_ticket, trace_id, detail
+//   尾部可选 region_id i32（epoch 2.2，T1 包授权）——缺省 0。
+//   解码对旧 v1 记录（无 region_id 尾巴）保持兼容：无尾巴按 0 处理。
 inline std::string encode_event(const Event& e) {
   std::string buf;
   buf.reserve(128);
@@ -56,6 +58,7 @@ inline std::string encode_event(const Event& e) {
     put(&n, 2);
     put(s->data(), n);
   }
+  put(&e.region_id, 4);
   return buf;
 }
 
@@ -81,6 +84,10 @@ inline bool decode_event(const char* data, size_t n, Event& e) {
     s->assign(data + off, len);
     off += len;
   }
+  if (n - off == 4)   // epoch 2.2 尾巴（旧记录缺失 → region_id=0）
+    get(&e.region_id, 4);
+  else
+    e.region_id = 0;
   return off == n;
 }
 

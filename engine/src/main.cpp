@@ -3,6 +3,8 @@
 //   engine_d --storage=file  --source=replay --replay=scripts/demo_day1.txt
 //   engine_d --storage=sqlite --source=stdin
 //   engine_d --storage=memory --projection=csv --seats=10
+//   engine_d --source=zmq --bind=tcp://127.0.0.1:5560   （需 -DSEATMESH_HAS_ZMQ）
+//   --region=N：多区部署区标识（epoch 2.2，事件携带 region_id）
 #include "engine/engine.hpp"
 #include "engine/timing_wheel.hpp"
 #include "storage/db_event_log.hpp"
@@ -39,6 +41,16 @@ std::string arg_of(int argc, char** argv, const std::string& key,
   return def;
 }
 void ensure_dir(const std::string& path) { ::mkdir(path.c_str(), 0755); }
+void print_outcome(const Outcome& out) {
+  char conflict_hex[24] = "";
+  if (out.conflict_mask)
+    std::snprintf(conflict_hex, sizeof conflict_hex, " conflict=0x%llx",
+                  static_cast<unsigned long long>(out.conflict_mask));
+  std::cout << (out.ok ? "OK   " : "REJECT ")
+            << (out.booking_id.empty() ? "-" : out.booking_id)
+            << conflict_hex
+            << (out.detail.empty() ? "" : " " + out.detail) << "\n";
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -50,8 +62,10 @@ int main(int argc, char** argv) {
   const std::string csv        = arg_of(argc, argv, "--csv", "/tmp/seatmesh/events.csv");
   const std::string pdb        = arg_of(argc, argv, "--pdb", "/tmp/seatmesh/projection.db");
   const int seats              = std::stoi(arg_of(argc, argv, "--seats", "200"));
+  const int region             = std::stoi(arg_of(argc, argv, "--region", "0"));
   const std::string source     = arg_of(argc, argv, "--source", "stdin");
   const std::string replay     = arg_of(argc, argv, "--replay", "");
+  const std::string bind_ep    = arg_of(argc, argv, "--bind", "tcp://127.0.0.1:5560");
 
   ensure_dir("/tmp/seatmesh");
 
@@ -83,6 +97,7 @@ int main(int argc, char** argv) {
 
   EngineConfig cfg;
   cfg.n_seats = seats;
+  cfg.region_id = region;
   Engine engine(cfg, std::make_shared<SystemClock>(), std::move(log),
                 std::move(projection), std::move(publisher),
                 std::make_unique<TimerHeap>());
@@ -90,32 +105,47 @@ int main(int argc, char** argv) {
   std::cout << "[engine] recover: replayed to index "
             << engine.recover() << "\n";
 
-  std::unique_ptr<IRequestSource> src =
-      (source == "replay" && !replay.empty())
-          ? std::unique_ptr<IRequestSource>(
-                std::make_unique<ReplaySource>(replay))
-          : std::make_unique<StdinSource>();
+  std::unique_ptr<IRequestSource> src;
+  ZmqRouterSource* zsrc = nullptr;
+  if (source == "replay" && !replay.empty()) {
+    src = std::make_unique<ReplaySource>(replay);
+  } else if (source == "zmq") {
+    if (!ZmqRouterSource::available()) {
+      std::cerr << "--source=zmq 需 cppzmq 并以 -DSEATMESH_HAS_ZMQ 编译\n";
+      return 2;
+    }
+    auto z = std::make_unique<ZmqRouterSource>(bind_ep);
+    zsrc = z.get();
+    src = std::move(z);
+    std::cout << "[engine] zmq router on " << bind_ep << "\n";
+  } else {
+    src = std::make_unique<StdinSource>();
+  }
 
   int idle_ms = 0;
   while (true) {
-    if (auto req = src->poll()) {
+    std::string identity;
+    std::optional<IncomingRequest> req;
+    if (zsrc) {
+      IncomingRequest r;
+      if (zsrc->pop_request(r, identity)) req = std::move(r);
+    } else {
+      req = src->poll();
+    }
+    if (req) {
       idle_ms = 0;
       if (req->kind == "quit") break;
       const Outcome out = engine.dispatch(*req);
-      char conflict_hex[24] = "";
-      if (out.conflict_mask)
-        std::snprintf(conflict_hex, sizeof conflict_hex, " conflict=0x%llx",
-                      static_cast<unsigned long long>(out.conflict_mask));
-      std::cout << (out.ok ? "OK   " : "REJECT ")
-                << (out.booking_id.empty() ? "-" : out.booking_id)
-                << conflict_hex
-                << (out.detail.empty() ? "" : " " + out.detail) << "\n";
+      if (zsrc)
+        zsrc->send_reply(identity, outcome_to_json(out));  // [identity][json]
+      else
+        print_outcome(out);
     }
     engine.tick();
 #if defined(__unix__) || defined(__APPLE__)
     ::usleep(20000);
 #endif
-    // 回放源耗尽后短暂排空定时器即退出；stdin 模式由 quit/Ctrl-C 结束
+    // 回放源耗尽后短暂排空定时器即退出；stdin/zmq 模式由 quit/Ctrl-C 结束
     if (src->exhausted() && ++idle_ms > 100) break;
   }
 

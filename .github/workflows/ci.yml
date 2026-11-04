@@ -1,0 +1,36 @@
+# SeatMesh CI 门禁（T5 追加）：契约先行，质量断言随后。
+# 与根 Makefile 的 `make ci` 目标等价串联。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contract-and-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 契约测试 + 引擎单测（C++，make test-engine）
+        run: make test-engine
+
+      - name: Python 契约演示（MockEngine 全语义走查）
+        run: make demo-python
+
+      - name: 并发压测 0 超卖断言（sre/stress.py --quick）
+        run: python3 sre/stress.py --quick
+
+      - name: 审计器自检（伪造重叠双预约必须被抓，sre/audit.py --selftest）
+        run: python3 sre/audit.py --selftest
+
+      - name: 数据管道自检（同种子一致 + 高峰/低谷占用比>2，ai/pipeline.py --selftest）
+        run: python3 ai/pipeline.py --selftest

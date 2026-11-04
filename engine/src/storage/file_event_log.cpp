@@ -79,8 +79,52 @@ bool FileEventLog::write_snapshot() {
   std::fclose(f);
   std::rename(bin.c_str(), (snap_path_ + ".bin").c_str());   // 原子替换
   std::rename(meta.c_str(), (snap_path_ + ".meta").c_str());
+  rotate_wal();   // 快照成功后轮转：当前 WAL → wal.1，新开 wal.log（compaction）
   return true;
 }
+
+void FileEventLog::rotate_wal() {
+  if (wal_) {
+    std::fflush(wal_);
+    std::fclose(wal_);
+    wal_ = nullptr;
+  }
+  // 原子 rename 覆盖上一代 wal.1（只保留一代，快照已含更早历史）
+  std::rename(wal_path_.c_str(), (wal_path_ + ".1").c_str());
+  open_wal();
+}
+
+namespace {
+// 读一个 WAL 段：返回是否读到损坏记录（撕裂尾/CRC 错）。
+// 每条有效记录：++cur；cur > snap_idx 才 apply（快照已含的跳过）。
+bool replay_segment(const char* path, uint64_t snap_idx, uint64_t& cur,
+                    uint64_t& idx_out, const ApplyFn& apply) {
+  std::FILE* f = std::fopen(path, "rb");
+  if (!f) return false;
+  bool broken = false;
+  Event e;
+  for (;;) {
+    uint8_t header[12];
+    if (std::fread(header, 1, sizeof(header), f) != sizeof(header)) break;
+    if (header[0] != 'S' || header[1] != 'M') { broken = true; break; }  // 损坏，截断
+    const uint32_t len = header[4] | (header[5] << 8) | (header[6] << 16) |
+                         (header[7] << 24);
+    const uint32_t crc = header[8] | (header[9] << 8) | (header[10] << 16) |
+                         (header[11] << 24);
+    std::string payload(len, '\0');
+    if (len && std::fread(payload.data(), 1, len, f) != len) { broken = true; break; }  // 撕裂尾
+    if (crc32(payload.data(), payload.size()) != crc) { broken = true; break; }         // 翻转字节
+    ++cur;
+    if (cur > snap_idx) {
+      if (decode_event(payload.data(), payload.size(), e) && apply)
+        apply(e, cur);
+      idx_out = cur;
+    }
+  }
+  std::fclose(f);
+  return broken;
+}
+}  // namespace
 
 uint64_t FileEventLog::replay() {
   uint64_t snap_idx = 0;
@@ -101,28 +145,12 @@ uint64_t FileEventLog::replay() {
     idx_ = snap_idx;
   }
 
-  // 回放 WAL：校验 magic/crc，遇到损坏尾部即停（半条记录 = 崩溃时未完成写入）
-  std::FILE* f = std::fopen(wal_path_.c_str(), "rb");
-  if (!f) return idx_;
+  // 回放顺序：wal.1（上一代，快照前的历史）→ wal.log（当前代）。
+  // 全局 index 跨段连续计数；任一段损坏即停止（后续段不再可信）。
+  const std::string wal1 = wal_path_ + ".1";
   uint64_t cur = 0;
-  Event e;
-  for (;;) {
-    uint8_t header[12];
-    if (std::fread(header, 1, sizeof(header), f) != sizeof(header)) break;
-    if (header[0] != 'S' || header[1] != 'M') break;  // 损坏，截断
-    const uint32_t len = header[4] | (header[5] << 8) | (header[6] << 16) |
-                         (header[7] << 24);
-    const uint32_t crc = header[8] | (header[9] << 8) | (header[10] << 16) |
-                         (header[11] << 24);
-    std::string payload(len, '\0');
-    if (len && std::fread(payload.data(), 1, len, f) != len) break;  // 撕裂尾
-    if (crc32(payload.data(), payload.size()) != crc) break;         // 翻转字节
-    ++cur;
-    if (cur <= snap_idx) continue;  // 快照已含
-    if (decode_event(payload.data(), payload.size(), e) && apply_) apply_(e, cur);
-    idx_ = cur;
-  }
-  std::fclose(f);
+  if (replay_segment(wal1.c_str(), snap_idx, cur, idx_, apply_)) return idx_;
+  (void)replay_segment(wal_path_.c_str(), snap_idx, cur, idx_, apply_);
   return idx_;
 }
 

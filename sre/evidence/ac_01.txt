@@ -1,0 +1,10 @@
+# AC-01 0 超卖：并发抢同一座位，成功响应==1 且 double_assign==0
+# cmd: /opt/homebrew/opt/python@3.15/bin/python3.15 sre/stress.py --quick
+# exit=0 seconds=0.04
+# at=2026-11-04T15:33:53
+
+[stress] threads=8 ops/thread=50 total=400 (544310.3 ops/s, 0.001s)
+[stress] 查询=360 (90%) 抢座尝试=40 成功响应=1 拒绝={'E_CONFLICT': 39}
+[stress] 热点座位 seat=3 day=1 bits=0xff0000000000 expect=0xff0000000000
+[stress] 断言 成功响应==1: PASS; double_assign==0: PASS (violations=0); 最终位图一致: PASS
+OVERSELL_CHECK: PASS

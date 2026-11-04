@@ -21,6 +21,10 @@ const char* type_name(EventType t) {
     case EventType::GRANT_OFFER: return "GRANT_OFFER";
     case EventType::GRANT_CLAIM: return "GRANT_CLAIM";
     case EventType::GRANT_EXPIRE: return "GRANT_EXPIRE";
+    case EventType::BREAKAWAY: return "BREAKAWAY";
+    case EventType::RETURN: return "RETURN";
+    case EventType::DONE: return "DONE";
+    case EventType::SEAT_CHANGED: return "SEAT_CHANGED";
     case EventType::FREEZE: return "FREEZE";
     case EventType::SAGA: return "SAGA";
     case EventType::SYSTEM: return "SYSTEM";

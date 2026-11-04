@@ -6,13 +6,19 @@ ENGINE_SRC = src/engine.cpp \
              src/storage/db_event_log.cpp \
              src/storage/projections.cpp
 
-.PHONY: build-engine test-engine demo-engine demo-python all
+.PHONY: build-engine test-engine test-engine-full fuzz demo-engine demo-python all ci
 
 build-engine:
 	cd engine && $(CXX) $(CXXFLAGS) -Iinclude -Isrc src/main.cpp $(ENGINE_SRC) -lsqlite3 -o /tmp/engine_d
 
+# 契约一致性测试（三存储字节级一致）
 test-engine:
 	cd engine && $(CXX) $(CXXFLAGS) -Iinclude -Isrc tests/test_log_contract.cpp $(ENGINE_SRC) -lsqlite3 -o /tmp/seatmesh_test_bin && /tmp/seatmesh_test_bin
+
+# 引擎全量单测（状态机 103 断言 + fuzz 8 种子）——T1 阶段一/二交付
+test-engine-full fuzz:
+	cd engine && $(CXX) $(CXXFLAGS) -Iinclude -Isrc tests/test_engine.cpp $(ENGINE_SRC) -lsqlite3 -o /tmp/seatmesh_test_engine && /tmp/seatmesh_test_engine
+	cd engine && $(CXX) $(CXXFLAGS) -Iinclude -Isrc tests/test_fuzz.cpp $(ENGINE_SRC) -lsqlite3 -o /tmp/seatmesh_test_fuzz && /tmp/seatmesh_test_fuzz
 
 demo-engine: build-engine
 	rm -rf /tmp/seatmesh && mkdir -p /tmp/seatmesh
@@ -24,3 +30,14 @@ demo-python:
 	python3 gateway/demo_contract.py
 
 all: build-engine demo-python
+
+# ---- T5 追加：CI 门禁（与 .github/workflows/ci.yml 等价串联） ----
+.PHONY: ci
+ci:
+	$(MAKE) test-engine
+	$(MAKE) test-engine-full
+	$(MAKE) demo-python
+	python3 sre/stress.py --quick
+	python3 sre/audit.py --selftest
+	python3 ai/pipeline.py --selftest
+	python3 -m sre.jepsen --quick

@@ -50,10 +50,15 @@ struct Booking {
   uint64_t     mask = 0;
   BookingState state = BookingState::PENDING_ENTRY;
   int64_t      start_ms = 0;        // 时段开始（UNIX ms）
-  int64_t      deadline_ms = 0;     // PENDING_ENTRY=入馆截止 / GRANTED=授权截止
+  int64_t      deadline_ms = 0;     // PENDING_ENTRY=入馆截止 / GRANTED=授权截止 / BREAKAWAY=保留截止
   uint64_t     seq = 0;             // 创建事件 seq（确定性 ID 的来源）
   uint64_t     expire_timer = 0;    // 入馆截止定时器（终态迁移时必须撤销）
   uint64_t     end_timer = 0;       // 自然离馆定时器（时段结束 → LEFT+1）
+  // ---- epoch 2.2 增量（T1 包授权）----
+  int32_t      start_min = -1;      // 距 06:00 分钟（候补授权/快照恢复时重算截止用）
+  int32_t      end_min = -1;
+  std::string  ticket;              // 候补授权票据 "T<seq>"（GRANTED/PENDING_ENTRY 经授权路径时有值）
+  uint64_t     breakaway_timer = 0; // 中途离开保留期定时器（IN_LIBRARY↔BREAKAWAY 迁移时撤销/重挂）
 };
 
 }  // namespace seatmesh

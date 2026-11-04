@@ -1,0 +1,11 @@
+# AC-04 契约演示：MockEngine 全语义 + 并发 0 超卖 + 副本视图
+# cmd: make demo-python
+# exit=0 seconds=0.05
+# at=2026-11-04T15:33:55
+
+python3 gateway/demo_contract.py
+[0超卖] 100 并发抢 1 座 → 恰好 1 人成功，99 人收到精确冲突位图
+[副本] 消费 2 条事件后，副本位图与引擎一致 (last_seq=1)
+[信用] 同一事件重复消费不重复扣分，余额正确
+[演练] 过去时段拒绝 / 活跃唯一 / 早鸟保留截止=08:30 且不越过时段 — 全部正确
+RESULT: ALL PASS

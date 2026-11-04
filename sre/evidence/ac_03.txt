@@ -1,0 +1,18 @@
+# AC-03 契约测试：engine C++ 契约 + 单测全绿
+# cmd: make test-engine
+# exit=0 seconds=2.17
+# at=2026-11-04T15:33:55
+
+cd engine && c++ -std=c++17 -Wall -Wextra -Iinclude -Isrc tests/test_log_contract.cpp src/engine.cpp src/storage/file_event_log.cpp src/storage/db_event_log.cpp src/storage/projections.cpp -lsqlite3 -o /tmp/seatmesh_test_bin && /tmp/seatmesh_test_bin
+PASS inmemory roundtrip
+PASS file roundtrip
+PASS file == inmemory (字节级一致)
+PASS sqlite roundtrip
+PASS sqlite == inmemory (字节级一致)
+PASS file snapshot + tail replay
+PASS sqlite snapshot + tail replay
+PASS file 损坏尾部检测（crc 截断）
+PASS wal → wal.1 原子轮转
+PASS file rotation: replay wal.1 → wal.log，快照前跳过
+PASS file rotation: wal.1 撕裂尾截断，wal.log 不再回放
+RESULT: ALL PASS

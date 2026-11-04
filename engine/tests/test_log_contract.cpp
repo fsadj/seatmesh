@@ -7,6 +7,8 @@
 #include "storage/file_event_log.hpp"
 #include "storage/in_memory_log.hpp"
 
+#include <sys/stat.h>
+
 #include <cstdio>
 #include <iostream>
 #include <vector>
@@ -14,6 +16,16 @@
 using namespace seatmesh;
 
 namespace {
+
+void ensure_test_dir(const char* path) { ::mkdir(path, 0755); }
+bool file_exists(const std::string& path) {
+  if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+    std::fclose(f);
+    return true;
+  }
+  return false;
+}
+
 
 std::vector<Event> sample_events() {
   std::vector<Event> es;
@@ -199,6 +211,80 @@ int main() {
     log->set_apply([&applied](const Event&, uint64_t) { ++applied; });
     log->replay();
     expect(applied < 3, "file 损坏尾部检测（crc 截断）");
+  }
+
+  // ---- WAL 轮转（T1 阶段一）：快照成功后 wal → wal.1，replay 按 wal.1 → wal.log ----
+  ensure_test_dir("/tmp/seatmesh_test");
+  remove_file("/tmp/seatmesh_test/wal_r.log");
+  remove_file("/tmp/seatmesh_test/wal_r.log.1");
+  remove_file("/tmp/seatmesh_test/snap_r.bin");
+  remove_file("/tmp/seatmesh_test/snap_r.meta");
+  {
+    constexpr char kBlob[] = "ROTATED_STATE_V2";
+    std::string restored;
+    {
+      LogPtr log = std::make_unique<FileEventLog>("/tmp/seatmesh_test/wal_r.log",
+                                                  "/tmp/seatmesh_test/snap_r");
+      std::vector<std::string> live;
+      log->set_apply([&live](const Event& e, uint64_t) {
+        live.push_back(encode_event(e));
+      });
+      log->set_snapshot([kBlob] { return std::string(kBlob); },
+                        [&restored](const std::string& s) { restored = s; });
+      for (int i = 0; i < 4; ++i) (void)log->append(es[i]);
+      if (!log->write_snapshot()) std::cout << "FAIL rotation snapshot\n", ++failures;
+      (void)log->append(es[4]);   // 轮转后写入新一代 wal.log
+      log->barrier();
+    }
+    if (!file_exists("/tmp/seatmesh_test/wal_r.log.1"))
+      std::cout << "FAIL wal.1 不存在（未轮转）\n", ++failures;
+    else
+      std::cout << "PASS wal → wal.1 原子轮转\n";
+    std::vector<std::string> replayed;
+    LogPtr log = std::make_unique<FileEventLog>("/tmp/seatmesh_test/wal_r.log",
+                                                "/tmp/seatmesh_test/snap_r");
+    log->set_snapshot([] { return std::string(); },
+                      [&restored](const std::string& s) { restored = s; });
+    log->set_apply([&replayed](const Event& e, uint64_t) {
+      replayed.push_back(encode_event(e));
+    });
+    const uint64_t idx = log->replay();
+    expect(restored == kBlob && replayed.size() == 1 &&
+               replayed[0] == encode_event(es[4]) && idx == 5,
+           "file rotation: replay wal.1 → wal.log，快照前跳过");
+  }
+
+  // wal.1 撕裂尾 → 截断停止，后续段不再可信
+  remove_file("/tmp/seatmesh_test/wal_t.log");
+  remove_file("/tmp/seatmesh_test/wal_t.log.1");
+  remove_file("/tmp/seatmesh_test/snap_t.bin");
+  remove_file("/tmp/seatmesh_test/snap_t.meta");
+  {
+    LogPtr log = std::make_unique<FileEventLog>("/tmp/seatmesh_test/wal_t.log",
+                                                "/tmp/seatmesh_test/snap_t");
+    log->set_apply([](const Event&, uint64_t) {});
+    log->set_snapshot([] { return std::string("TORN_STATE"); },
+                      [](const std::string&) {});
+    for (int i = 0; i < 3; ++i) (void)log->append(sample_events()[0]);
+    (void)log->write_snapshot();          // 轮转：3 条进 wal_t.log.1
+    for (int i = 0; i < 2; ++i) (void)log->append(sample_events()[0]);  // wal_t.log
+  }
+  if (std::FILE* f = std::fopen("/tmp/seatmesh_test/wal_t.log.1", "r+b")) {
+    std::fseek(f, 20, SEEK_SET);
+    int c = std::fgetc(f);
+    std::fseek(f, 20, SEEK_SET);
+    std::fputc(c ^ 0xFF, f);
+    std::fclose(f);
+  }
+  {
+    size_t applied = 0;
+    LogPtr log = std::make_unique<FileEventLog>("/tmp/seatmesh_test/wal_t.log",
+                                                "/tmp/seatmesh_test/snap_t");
+    log->set_snapshot([] { return std::string(); }, [](const std::string&) {});
+    log->set_apply([&applied](const Event&, uint64_t) { ++applied; });
+    const uint64_t idx = log->replay();
+    expect(applied == 0 && idx == 3,
+           "file rotation: wal.1 撕裂尾截断，wal.log 不再回放");
   }
 
   std::cout << (failures ? "RESULT: FAIL\n" : "RESULT: ALL PASS\n");

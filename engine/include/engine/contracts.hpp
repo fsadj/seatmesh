@@ -46,7 +46,19 @@ constexpr int    kApplyCloseMin = 21 * 60 + 45;       // 21:45 截止
 constexpr int64_t kGrantTtlMs    = 60 * 1000;         // 候补授权期
 constexpr int64_t kSagaTimeoutMs = 30 * 1000;         // 跨区配额确认
 
+// ---------- epoch 2.2 增量（T1 包授权：候补授权 / SHED / 读己之写 / region） ----------
+// T5 汇总、T1+T3 签字。Python 侧 gateway/contracts.py 的对应字段随后续契约
+// 回归补齐（本增量先落 C++ 侧实现，字段语义以本节为准）。
+constexpr int      kMaxInflight        = 1024;       // 准入控制：in-flight 上限
+constexpr int32_t  kShedBackoffHintMs  = 20;         // SHED 时的建议回退
+constexpr uint32_t kIdempotentCap      = 100000;     // 幂等表 LRU 上限（超限淘汰最旧）
+constexpr int      kDefaultRegionId    = 0;          // --region=N 的缺省区
+
 // ---------- 事件（日志与 apply 的唯一记录类型） ----------
+// epoch 2.2（T1 包授权）候补授权语义：
+//   GRANT_CLAIM / GRANT_EXPIRE 落日志（apply 幂等复核，重放安全）；
+//   GRANT_OFFER 为派生事件——授权依赖内存候补队列（重启清空为已知限制），
+//   无法从日志确定性重建，故只在事件流发布、不落日志（与队列同限制）。
 enum class EventType : uint8_t {
   RESERVE = 1, CANCEL, CHECKIN, CHECKOUT, NO_SHOW,
   GRANT_OFFER, GRANT_CLAIM, GRANT_EXPIRE,
@@ -71,11 +83,15 @@ struct Event {
   std::string queue_ticket;
   std::string trace_id;            // 16B hex，贯穿网关→引擎→事件流
   std::string detail;              // 拒绝原因 / 人类可读补充
+  int32_t    region_id = 0;        // epoch 2.2（T1 包授权）：多区部署的区标识
 };
 
 // ---------- 入站请求（由 IRequestSource 投喂，未成事件） ----------
 struct IncomingRequest {
   std::string kind;   // "reserve" | "cancel" | "checkin" | "checkout" | "quit"
+                      // epoch 2.2（T1 包授权）新增 kind：claim_ticket（凭 ticket 认领候补授权）
+  bool leave = false;               // checkin 专用：true = 中途离开（BREAKAWAY）
+  bool enqueue_if_conflict = false; // reserve 专用：冲突时入候补队列（与 T3 ReserveRequest 同名）
   Event ev;           // 复用字段载体，kind 决定哪些字段有效
 };
 
@@ -168,6 +184,12 @@ struct Outcome {
   std::string booking_id;
   uint64_t    conflict_mask = 0;   // 冲突时：与请求重叠的已占片
   std::string detail;
+  // ---- epoch 2.2 增量（T1 包授权）----
+  uint64_t    applied_seq = 0;     // 读己之写：本请求经 apply 的 seq（预检拒绝/SHED = 0）
+  std::string queue_ticket;        // 候补入队返回 "T<seq>"；认领时凭此 ticket（detail=E_QUEUED）
+  int32_t     queue_pos = 0;       // 入队时在 (day_idx, seat) 队列中的位次（1 起）
+  bool        shed = false;        // 准入拒绝（in-flight 超限）；未落日志，客户端按建议回退
+  int32_t     backoff_hint_ms = 0; // shed=true 时携带 kShedBackoffHintMs
 };
 
 }  // namespace seatmesh
